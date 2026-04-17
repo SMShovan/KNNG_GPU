@@ -1,5 +1,7 @@
 # knng
 
+[![CI](https://github.com/SMShovan/KNNG_GPU/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SMShovan/KNNG_GPU/actions/workflows/ci.yml)
+
 A GPU-accelerated framework for building **approximate K-nearest neighbor
 graphs (KNNG)** over large, high-dimensional vector datasets.
 

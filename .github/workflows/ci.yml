@@ -1,0 +1,96 @@
+name: CI
+
+# ----------------------------------------------------------------------------
+# knng — continuous integration.
+#
+# Scope: Linux (gcc + clang) and macOS (AppleClang) build + test of the
+# CPU-only portion of the project. CUDA is deliberately absent — there
+# is no GPU on GitHub-hosted runners, and simulating one would only
+# verify that `nvcc` compiles, which is a weak signal. CUDA CI joins
+# the matrix when Phase 7 introduces the CUDA build path and a self-
+# hosted GPU runner is arranged.
+#
+# Three jobs:
+#   * build-and-test — the primary gate: configure, build, `ctest`.
+#   * docs           — Doxygen build on Linux with graphviz installed.
+#                      Separate from build-and-test so the main gate
+#                      does not depend on Doxygen versions or
+#                      graphviz availability.
+#
+# Triggered on pushes to `main` and on every pull request targeting
+# `main`. No schedule — every change proposes its own CI run, and
+# cron-style nightly runs add cost without corresponding signal until
+# we have benchmark regressions to track.
+# ----------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs when a new commit lands on the same branch —
+# avoids burning runner minutes on superseded work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Linux / GCC"
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - name: "Linux / Clang"
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: "macOS / AppleClang"
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compiler version
+        run: |
+          "$CXX" --version
+          cmake --version
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  docs:
+    name: Build docs (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Doxygen + Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz
+
+      - name: Configure (tests disabled to skip GoogleTest fetch)
+        run: cmake -S . -B build -DKNNG_BUILD_TESTS=OFF
+
+      - name: Build Doxygen HTML
+        run: cmake --build build --target docs

@@ -18,6 +18,107 @@ code diff.
 
 ---
 
+## [Step 05] — CI scaffolding via GitHub Actions (2026-04-17)
+
+### What
+- Added `.github/workflows/ci.yml`, a GitHub Actions workflow with two
+  jobs:
+  * **`build-and-test`** — matrix over `{Linux/GCC, Linux/Clang,
+    macOS/AppleClang}`, each one running
+    `cmake -S . -B build && cmake --build build && ctest`.
+    `fail-fast: false` so a single compiler's regression does not mask
+    others; `CMAKE_BUILD_PARALLEL_LEVEL=4` matches GitHub-hosted
+    runner cores.
+  * **`docs`** — Linux-only, installs Doxygen + graphviz and runs
+    `cmake --build build --target docs`. Configured with
+    `-DKNNG_BUILD_TESTS=OFF` so this job does not pay the GoogleTest
+    FetchContent cost.
+- Triggered on pushes to `main` and on pull requests targeting
+  `main`. `concurrency: cancel-in-progress: true` on `ci-${{ ref }}`
+  so a new commit supersedes its predecessor rather than letting both
+  burn runner minutes.
+- Added a CI status badge to `README.md`.
+
+### Why
+A CI harness at Step 05 — before Phase 1's algorithm code lands —
+means every subsequent step is verified on three compilers the moment
+a commit is pushed, not the moment somebody happens to notice a
+regression. Catching a portability issue when a single file is the
+whole surface area is orders of magnitude cheaper than bisecting
+through a dozen steps of accumulated algorithmic work. Three
+compilers (GCC, Clang, AppleClang) is deliberately the floor: it
+catches the most common "works on my compiler" failure modes without
+overspending on exotic targets that we do not claim to support at
+Phase 0.
+
+### Tradeoff
+- **No CUDA in the matrix (yet).** GitHub-hosted runners have no GPU;
+  running `nvcc` in compile-only mode proves the toolchain installed
+  correctly but says nothing about kernel correctness or performance.
+  Adding a self-hosted GPU runner has real cost (hardware, network,
+  credential management) and will be done in Phase 7 when the
+  algorithmic GPU code actually exists to justify it.
+- **No Windows in the matrix.** The project's target hardware is
+  Linux/HPC and ultimately MI350A APU — Windows is not a platform
+  we commit to supporting. MSVC warning flags remain in
+  `cmake/CompilerWarnings.cmake` so a future Windows port is not
+  more painful than it needs to be, but CI time on a platform nobody
+  will use for production is wasted signal.
+- **Concurrency cancellation on push-to-main.** If two commits land
+  on `main` in quick succession, the earlier CI run is cancelled in
+  favor of the newer commit. Tradeoff: a partially-green history
+  (some middle commits never got a pass/fail verdict), but the
+  head-of-branch status is always current and runner minutes are
+  used only for the latest state. Good tradeoff for a single-
+  developer, trunk-based repository; revisit if the project grows a
+  release-branch model.
+- **Default compilers, not pinned versions.** Using `gcc`, `clang`,
+  and AppleClang as whatever the runner image ships means compiler
+  upgrades arrive automatically — good for catching drift early
+  (warnings-as-errors bites if a new compiler adds a warning), bad
+  for reproducibility of a *specific* green run. The alternative —
+  pinning e.g. `gcc-13` — trades early warning for historical
+  reproducibility. Acceptable at Phase 0; will likely pin to
+  specific toolchain versions once benchmark numbers start being
+  committed.
+- **Docs job is a separate gate, not a step inside
+  `build-and-test`.** Keeping the Doxygen install and the docs build
+  off the critical-path matrix means a Doxygen version bump or a
+  graphviz flakiness does not redden the primary status indicator.
+  The docs job still runs per-commit; its status is reported
+  separately in PR checks.
+
+### Learning
+- `CMAKE_BUILD_PARALLEL_LEVEL` (env-level) is a less-known alternative
+  to `cmake --build -j N`. Setting it in the `env:` block at job
+  scope lets every `cmake --build` step inherit the parallelism
+  without repeating `-j 4` at each call site.
+- `${{ github.ref }}` is the correct concurrency key for "cancel
+  on same branch" — NOT `github.sha` (every commit has a unique sha
+  and nothing would ever be cancelled). This is a small trap; the
+  GitHub docs show the right pattern but it is easy to cargo-cult
+  the wrong one from an older example.
+- GitHub-hosted `ubuntu-latest` runners ship gcc AND clang
+  pre-installed — no `apt install` needed for the compiler itself,
+  only for auxiliary tools like Doxygen/graphviz. Makes the workflow
+  file much shorter than the classic "install-compilers-then-build"
+  pattern.
+- The docs job's `-DKNNG_BUILD_TESTS=OFF` is a genuine ~15-second
+  savings per run (GoogleTest clone + build) — not huge, but it
+  compounds over the project's lifetime and keeps the docs job
+  focused on what it actually verifies.
+
+### Next
+Step 06 will add `docs/STYLE.md` — the project's short coding-style
+guide: naming, header guards, include order, const-correctness,
+Doxygen expectations — plus a formalized `CHANGELOG.md` template so
+the What/Why/Tradeoff/Learning/Next pattern already in use is
+documented explicitly and cross-referenced from `STYLE.md`. That
+closes Phase 0. Phase 1 (Naive CPU Reference) opens on the next
+working day.
+
+---
+
 ## [Step 04] — Doxygen configuration (2026-04-17)
 
 ### What

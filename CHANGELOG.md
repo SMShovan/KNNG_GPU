@@ -1,20 +1,108 @@
 # Changelog
 
 All notable changes to this project are documented here, one entry per
-development step. Entries are ordered newest-first and follow the structure:
+development step. Entries are ordered newest-first and follow the
+`What / Why / Tradeoff / Learning / Next` structure. The canonical
+template, with expectations for each section, is documented in
+[`docs/STYLE.md`](docs/STYLE.md) §14.
 
-```
-## [Step NN] — Short title (YYYY-MM-DD)
+The goal of this document is pedagogical: each entry should make the
+*why* of the change obvious to a reader scanning the history,
+independent of the code diff.
+
+---
+
+## [Step 06] — Coding style guide + CHANGELOG template (2026-04-17)
+
 ### What
-### Why
-### Tradeoff
-### Learning
-### Next
-```
+- Added `docs/STYLE.md`, the project's authoritative style reference.
+  Fourteen short sections covering: C++ dialect, file extensions,
+  `#include` order (with a worked example), naming, index types,
+  the `Distance` API convention, const-correctness + `noexcept`,
+  error-handling policy, performance-critical constraints, comments
+  + Doxygen requirements, the warning policy, testing expectations,
+  git/commit discipline, and the `CHANGELOG.md` section template.
+- Formalised the `CHANGELOG.md` preamble to cross-reference
+  `STYLE.md` §14 as the canonical template source, rather than
+  duplicating the template in-place.
+- Every rule in `STYLE.md` describes the convention already in use
+  in the committed code (Steps 01–05). No retro-rewrites of existing
+  files were needed.
 
-The goal of this document is pedagogical: each entry should make the *why*
-of the change obvious to a reader scanning the history, independent of the
-code diff.
+### Why
+A written style guide does two things a tacit one cannot: it settles
+arguments before they start, and it tells a future contributor
+(including a future me, six months from now) what the conventions
+*are* without requiring them to read every file to triangulate. At
+this phase the code is small enough that divergence from the guide
+is still cheap to fix; once Phase 1's algorithm files start landing,
+convention drift becomes expensive. Ship the guide now.
+
+The guide is also the closing step of Phase 0: every invariant the
+rest of the project depends on — naming, includes, warnings, testing,
+changelog format — now has a single URL a contributor can be pointed
+at.
+
+### Tradeoff
+- **Guide, not enforcement.** `STYLE.md` documents conventions but
+  does not enforce them mechanically. clang-format + clang-tidy
+  would automate a portion (include order, naming for some
+  categories, some const-correctness rules) but add a configuration
+  surface and another tool to install. Deferred until the project
+  grows more contributors; a soloist rereading the guide before each
+  commit is cheaper than fighting a formatter-clang-tidy stack on
+  every save.
+- **Short guide, not exhaustive.** Some things deliberately left out:
+  which standard algorithms to prefer (`std::ranges::sort` vs
+  `std::sort`), lambda capture conventions, exception-specification
+  policy beyond `noexcept` at the free-function level. The guide
+  takes the position that "if you can derive the right answer from
+  existing code, ask" is cheaper than trying to codify every micro-
+  decision in advance. Grow the guide when a concrete disagreement
+  surfaces.
+- **CHANGELOG template lives in STYLE.md, not as a separate file.**
+  The template is small enough (≈30 lines) that a dedicated
+  `CHANGELOG_TEMPLATE.md` would be overkill. Embedded in the style
+  guide as §14 keeps it next to the other project-wide conventions
+  and avoids "which of these templates is the authoritative one"
+  drift between sibling files.
+- **No `clang-format` file committed at this step.** Related to the
+  enforcement tradeoff above. When the first disagreement about
+  brace-placement or column width happens, a clang-format file
+  lands in the same commit that resolves it — not before.
+
+### Learning
+- The include-order rule that fires the most often in practice is
+  "matching header first in implementation files." It is the single
+  most valuable rule because it makes `foo.cpp`'s correctness the
+  caller's problem, not the compiler's: if `foo.hpp` is not
+  self-contained, including it first lets the compiler tell us
+  immediately. Every other ordering rule is pedantic by comparison.
+- Writing the style guide after writing five commits of code is the
+  right sequencing. Writing it first would have produced a
+  document full of rules we then discovered were inconvenient; the
+  existing code is evidence that these specific rules work. This is
+  the opposite of the usual "document-driven-design" advice — but
+  for a solo learning project, working-code-first is faster and
+  more honest.
+- `snake_case_t` vs `PascalCase` for types is the single most
+  defensible decision to document explicitly. The C++ community
+  splits roughly in half on this, and the project's choice
+  (composite types PascalCase, scalar aliases `snake_case_t`) is
+  defensible but not a majority position. A one-line rule in
+  `STYLE.md` §4 forestalls a tedious future conversation.
+- Rules framed as tables (§2, §4) are dramatically easier to scan
+  than rules framed as bulleted prose. When a rule enumerates a
+  mapping between categories and values, use a table.
+
+### Next
+**Phase 0 is closed.** Next session opens Phase 1: the naive CPU
+reference. Step 07 is a small housekeeping step — add the
+`knng::Dataset` struct that was the outstanding residue of the
+plan's original "core types" step (most of which shipped early as
+Step 03). After that, Step 08 begins the real algorithmic work:
+scalar squared-L2 distance with the C-style pointer signature that
+later SIMD and GPU kernels will specialize.
 
 ---
 

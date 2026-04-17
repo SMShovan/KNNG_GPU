@@ -95,6 +95,13 @@ time — a missing Doxygen is a warning, not a configure failure. The
 generated HTML is never produced by a default `cmake --build`; it must
 be requested explicitly.
 
+## Contributing
+
+Project conventions — naming, include order, comment style, warning
+policy, test expectations, the `CHANGELOG.md` template — are
+documented in [`docs/STYLE.md`](docs/STYLE.md). Read it before sending
+a patch.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

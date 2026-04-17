@@ -29,6 +29,7 @@ set(_knng_doxygen_inputs
     "${PROJECT_SOURCE_DIR}/tools"
     "${PROJECT_SOURCE_DIR}/README.md"
     "${PROJECT_SOURCE_DIR}/CHANGELOG.md"
+    "${PROJECT_SOURCE_DIR}/docs/STYLE.md"
 )
 list(JOIN _knng_doxygen_inputs " \\\n                         " KNNG_DOXYGEN_INPUT)
 

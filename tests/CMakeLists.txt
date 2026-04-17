@@ -28,3 +28,25 @@ gtest_discover_tests(test_smoke
         LABELS "smoke"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_core` exercises the `knng::core` public API (types, Distance
+# concept, built-in metrics, the Knng adjacency struct). Linking
+# `knng::core` rather than `knng::headers` directly mirrors how a
+# downstream consumer of the library will build against us.
+add_executable(test_core core_test.cpp)
+target_link_libraries(test_core
+    PRIVATE
+        knng::core
+        GTest::gtest_main
+)
+knng_set_warnings(test_core)
+
+set_target_properties(test_core PROPERTIES
+    OUTPUT_NAME "test_core"
+)
+
+gtest_discover_tests(test_core
+    PROPERTIES
+        LABELS "core"
+    DISCOVERY_TIMEOUT 10
+)

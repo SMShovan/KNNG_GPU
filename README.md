@@ -16,9 +16,11 @@ design decisions behind each step.
 ## Status
 
 Very early. This repository currently contains the build scaffolding, a
-`hello_knng` smoke-test executable, and a GoogleTest-based `ctest` suite
-with a version-header smoke test. See the changelog for the up-to-date
-step count.
+`hello_knng` smoke-test executable, a GoogleTest-based `ctest` suite, and
+the `knng::core` public API scaffold — scalar/index types, a `Distance`
+concept with `L2Squared` + `NegativeInnerProduct` metrics, and a flat
+`Knng` adjacency struct. No algorithms yet. See the changelog for the
+up-to-date step count.
 
 ## Design goals
 

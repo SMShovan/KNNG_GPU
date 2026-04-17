@@ -18,6 +18,111 @@ code diff.
 
 ---
 
+## [Step 03] — `knng::core` public API scaffold (2026-04-17)
+
+### What
+- Added the `knng::core` library as an INTERFACE (header-only) target
+  in `src/CMakeLists.txt`, aliased as `knng::core` and wired into the
+  root build via `add_subdirectory(src)`.
+- Introduced the first three public headers under
+  `include/knng/core/`:
+  * `types.hpp` — `knng::index_t` (`std::uint32_t`) for point indices
+    and `knng::dim_t` for dimensionalities. Separate aliases of the
+    same underlying type keep API signatures self-documenting.
+  * `distance.hpp` — the C++20 `knng::Distance` concept (callable,
+    `noexcept`, `float(std::span<const float>, std::span<const float>)`,
+    lower-is-better) plus two concrete metrics: `L2Squared` and
+    `NegativeInnerProduct`. Static asserts pin each metric to the
+    concept at library-compile time.
+  * `graph.hpp` — `knng::Knng`, a plain-old-data adjacency struct
+    with parallel `neighbors[n*k]` and `distances[n*k]` flat arrays,
+    plus `neighbors_of(i) / distances_of(i)` `std::span` accessors.
+- Added `tests/core_test.cpp` + `test_core` executable, linking
+  `knng::core` + `GTest::gtest_main` under the full
+  `knng_set_warnings()` policy. Seven TESTs cover both metrics, the
+  concept, and the `Knng` layout invariants (shape, row stride,
+  mutating views).
+- Verified: `cmake --build build && ctest` → **10 tests passed, 0
+  failed** (3 smoke + 7 core). Incremental reconfigure; no warnings.
+
+### Why
+Every step after this one needs a vocabulary: a way to spell
+"point index", "feature vector", "distance metric", and "K-nearest
+neighbor graph". Pinning those names in Step 03 — before any
+algorithm is written — means the CPU reference builder, the GPU
+kernels, and the distributed exchange routines will all describe
+their inputs and outputs in the same types. Refactoring core types
+after downstream code exists is the expensive time to do it.
+
+The Distance concept is the key design choice here. By declaring
+"any monotone-lower-is-better scoring functor" as a *concept* rather
+than a virtual class, metric choice is a compile-time specialization
+of every algorithm — no vtable indirection in the innermost loop.
+This matters enormously on GPU, where divergent virtual dispatch is
+the fastest way to lose 10x of throughput.
+
+### Tradeoff
+- **INTERFACE library, not STATIC.** Header-only is the simplest
+  thing that works when there are no `.cpp` files yet. It also keeps
+  consumers that pull `knng::core` via `FetchContent` from paying
+  any compile cost. The downside: template-heavy headers eventually
+  cost compile time for everyone who includes them; when the first
+  non-template code lands (a brute-force builder, quantization
+  tables, etc.) this target will transparently upgrade to STATIC.
+- **Negated inner product, not raw IP.** Every algorithm in the
+  library assumes "smaller == closer". Keeping that invariant at the
+  metric boundary (negate on the way in) rather than in every search
+  / refinement routine (branch on metric kind) is cheaper in code
+  and in runtime — one subtraction instead of an extra comparison
+  per candidate. Same trick FAISS uses for its IP index.
+- **Squared L2, not L2.** Algorithms only need the ordering, and
+  `sqrt` in the inner loop is a real performance hit on GPU. Magnitude
+  semantics are recovered by calling sqrt once on final output.
+- **`std::uint32_t` for `index_t`.** 2^32 ≈ 4.3 billion points is
+  well past our target per-node workload, but ruling it out is
+  conscious: scaling past that requires a distributed index scheme
+  (sub-graph sharding + global ID mapping) that will live at a
+  layer above `knng::core` anyway.
+- **Tests link `knng::core`, not `knng::headers`.** Mirrors how a
+  downstream user will consume the library — if linking `knng::core`
+  ever stops being sufficient to pick up the public headers, the
+  test suite fails first.
+
+### Learning
+- C++20 concepts are a genuinely better fit than CRTP or virtual
+  bases for performance-sensitive pluggable strategies. The whole
+  Distance contract — callable, noexcept, return type, parameter
+  shape — fits in six lines and produces a readable compiler error
+  when a new metric doesn't satisfy it.
+- `static_assert(Distance<L2Squared>)` at the end of the header costs
+  nothing at runtime and catches concept-breakage at library-compile
+  time rather than at first-use. Every concept-bound type should
+  self-witness like this.
+- Adding `add_subdirectory(src)` before `add_subdirectory(tests)`
+  matters — CMake targets are strict left-to-right in declaration
+  order, and the test target's `target_link_libraries(… knng::core)`
+  requires the alias to already exist.
+- The incremental CMake reconfigure just worked when the only new
+  subdirectory was `src/` with an INTERFACE library and a new
+  `tests/` executable. No build-tree clean was required; the
+  FetchContent'd GoogleTest was not re-downloaded.
+- Writing tests against `std::span<const float>{a}` explicitly (not
+  relying on CTAD through `std::span{a}`) is safer under
+  `-Wconversion` — CTAD deduces `std::span<float, N>` which then
+  narrows to `std::span<const float>` at the call site and has
+  occasionally been flagged by stricter compilers.
+
+### Next
+Step 4 will introduce a deterministic CPU brute-force KNNG builder
+(`knng::build_bruteforce`) as the correctness oracle for every
+future optimization. It will be parameterized on the `Distance`
+concept and will fill a `Knng` in row-major order; a unit test will
+cross-check its output against a hand-computed small example, and a
+second test will prove that repeated runs on the same input produce
+bit-identical output.
+
+---
+
 ## [Step 02] — GoogleTest wiring & smoke test (2026-04-16)
 
 ### What

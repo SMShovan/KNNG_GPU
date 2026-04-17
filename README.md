@@ -25,7 +25,7 @@ up-to-date step count.
 ## Design goals
 
 - **Correctness first.** Every algorithmic change is paired with unit tests
-  and recall@k measurements against a known ground truth.
+  and recall-at-k measurements against a known ground truth.
 - **Measured optimization.** Every optimization commit states the expected
   speedup, the observed speedup, and the tradeoff (memory, complexity,
   numeric precision) in the changelog.
@@ -59,6 +59,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/bin/hello_knng
 ctest --test-dir build --output-on-failure
+cmake --build build --target docs    # optional, requires Doxygen
 ```
 
 `hello_knng` prints the library version and the compile-time build
@@ -76,6 +77,21 @@ test target and internally consistent).
 | `KNNG_GOOGLETEST_TAG`         | `v1.15.2`               | Git tag used by `FetchContent` for GoogleTest               |
 
 More options will be added as later steps introduce CUDA, MPI, NCCL, etc.
+
+### Documentation
+
+If [Doxygen](https://www.doxygen.nl/) is installed, the `docs` target
+generates the full API reference as HTML:
+
+```sh
+cmake --build build --target docs
+open build/docs/html/index.html   # macOS; use xdg-open on Linux
+```
+
+The `docs` target is only created when Doxygen is detected at configure
+time — a missing Doxygen is a warning, not a configure failure. The
+generated HTML is never produced by a default `cmake --build`; it must
+be requested explicitly.
 
 ## License
 

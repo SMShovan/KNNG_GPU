@@ -1,0 +1,75 @@
+# Doxyfile.in — configured by CMake.
+#
+# Only non-default options appear here. Keeping the file small makes
+# Doxygen upgrades painless: new defaults flow through automatically
+# because we do not override them.
+
+# ---------------------------------------------------------------------------
+# Project identity
+# ---------------------------------------------------------------------------
+PROJECT_NAME           = "@PROJECT_NAME@"
+PROJECT_NUMBER         = "@PROJECT_VERSION@"
+PROJECT_BRIEF          = "GPU-accelerated approximate K-nearest neighbor graphs"
+
+# ---------------------------------------------------------------------------
+# Input tree
+# ---------------------------------------------------------------------------
+INPUT                  = @KNNG_DOXYGEN_INPUT@
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.cpp *.cuh *.cu *.md
+STRIP_FROM_PATH        = "@PROJECT_SOURCE_DIR@"
+EXCLUDE_PATTERNS       = */build/* */_deps/* */datasets/* */third_party/*
+USE_MDFILE_AS_MAINPAGE = "@KNNG_DOXYGEN_MAINPAGE@"
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+OUTPUT_DIRECTORY       = "@KNNG_DOXYGEN_OUTPUT@"
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+
+# ---------------------------------------------------------------------------
+# Extraction policy
+# ---------------------------------------------------------------------------
+# EXTRACT_ALL=YES makes every declaration visible in the generated HTML,
+# even without a leading /// comment. The companion WARN_IF_UNDOCUMENTED=YES
+# still flags any public symbol missing a @brief, so the "every public
+# function gets Doxygen" rule stays auditable via the warning log.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_LOCAL_CLASSES  = NO
+
+# ---------------------------------------------------------------------------
+# Warnings
+# ---------------------------------------------------------------------------
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = YES
+# Not WARN_AS_ERROR: the warning log is the audit surface, not a
+# build-breaker. CI can grep the log for issues if we ever want to
+# upgrade it to a hard gate.
+WARN_AS_ERROR          = NO
+
+# ---------------------------------------------------------------------------
+# C++ niceties
+# ---------------------------------------------------------------------------
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+BUILTIN_STL_SUPPORT    = YES
+MARKDOWN_SUPPORT       = YES
+AUTOLINK_SUPPORT       = YES
+GENERATE_TREEVIEW      = YES
+SORT_MEMBERS_CTORS_1ST = YES
+
+# ---------------------------------------------------------------------------
+# Graphs — optional; only useful when graphviz is available.
+# ---------------------------------------------------------------------------
+HAVE_DOT               = @KNNG_DOXYGEN_HAVE_DOT@
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = NO
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO

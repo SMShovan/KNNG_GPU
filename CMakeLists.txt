@@ -64,9 +64,12 @@ add_library(knng::headers ALIAS knng_headers)
 # `src/` owns the library targets (currently just `knng::core`, a
 # header-only INTERFACE library). `tools/` owns CLI executables that
 # link those library targets. Both must be added before `tests/` so
-# that test targets can link the aliases they define.
+# that test targets can link the aliases they define. `docs/` is
+# pulled in unconditionally — its own CMakeLists.txt gates the
+# `docs` target on whether Doxygen is installed.
 add_subdirectory(src)
 add_subdirectory(tools)
+add_subdirectory(docs)
 
 # --------------------------------------------------------------------------- #
 # Testing

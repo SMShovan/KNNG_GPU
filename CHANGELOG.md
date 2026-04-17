@@ -18,6 +18,94 @@ code diff.
 
 ---
 
+## [Step 04] — Doxygen configuration (2026-04-17)
+
+### What
+- Added `docs/Doxyfile.in` — a small, curated Doxygen configuration
+  that only overrides non-default options. Project name, version, and
+  input paths are substituted by CMake at configure time.
+- Added `docs/CMakeLists.txt` with a `find_package(Doxygen)` probe.
+  When Doxygen is present, a `docs` custom target is created; when
+  Doxygen is missing, configure emits a helpful STATUS message and
+  returns early — no hard dependency on Doxygen for the rest of the
+  build.
+- Wired `add_subdirectory(docs)` into the root `CMakeLists.txt`.
+- Input tree covers `include/`, `src/`, `tools/`, plus `README.md`
+  (used as the mainpage via `USE_MDFILE_AS_MAINPAGE`) and
+  `CHANGELOG.md` (so the design history is browsable alongside the
+  API reference).
+- Tuned the two noise sources that fired on the first run:
+  `CHANGELOG.md` is now an explicit input (so internal references
+  resolve), and the README's `recall@k` phrase was reworded to
+  `recall-at-k` so Doxygen's auto-command parser stops treating `@k`
+  as an unknown command.
+- Verified: `cmake --build build --target docs` → **67 HTML pages
+  generated, zero warnings**. Output in `build/docs/html/`.
+
+### Why
+The project's invariant is "every public function gets Doxygen"
+(Project Invariants). That rule is only enforceable if the doc build
+exists and runs cleanly — otherwise "undocumented" is invisible.
+Setting up Doxygen now, with just the `knng::core` public headers to
+document, means the feedback loop is fast (tiny input, tiny output)
+and the configuration can be iterated on before documentation volume
+becomes costly. Every subsequent public API lands into a working
+Doxygen pipeline that will warn on missing `@brief` / `@param` at
+build time — pedagogical pressure to keep the docs current.
+
+### Tradeoff
+- **Curated Doxyfile, not `doxygen -g` default.** A default-generated
+  Doxyfile is 3000+ lines of every setting Doxygen supports, most
+  never touched. Upgrading across Doxygen versions then becomes a
+  manual merge exercise. A curated Doxyfile (≈60 lines of overrides)
+  inherits new defaults for free; the tradeoff is that future option
+  changes must be made consciously. Net win for a long-lived project.
+- **`EXTRACT_ALL = YES` + `WARN_IF_UNDOCUMENTED = YES`.** Makes every
+  symbol visible in HTML (so the docs are a faithful API reference)
+  while still warning about missing `@brief` (so the "document
+  everything public" rule stays auditable). The alternative —
+  `EXTRACT_ALL = NO` — would hide undocumented symbols and make the
+  audit harder. `WARN_AS_ERROR = NO` so the warning log is
+  informational rather than a build-breaker; we can tighten this to
+  a hard gate in CI later if the warning count stays at zero.
+- **Docs target is opt-in, not default.** `add_custom_target(docs)`
+  (not `ALL`) means `cmake --build build` never runs Doxygen. The
+  cost of running Doxygen on every incremental rebuild would be
+  real; requiring an explicit `--target docs` keeps the inner loop
+  fast.
+- **Docs CMakeLists added unconditionally.** No `KNNG_BUILD_DOCS`
+  option — the docs subdirectory handles "Doxygen missing" itself.
+  This is simpler than a top-level option, and there is no
+  configure-time cost when Doxygen is absent (just the early
+  `return()` in `docs/CMakeLists.txt`).
+
+### Learning
+- Doxygen 1.16 gets confused by the Markdown sequence `recall@k` —
+  the `@` is treated as a command introducer even inside a narrative
+  sentence. Escaping with `\@` works inside doxygen blocks but breaks
+  regular Markdown rendering; rewording is cleaner.
+- Including Markdown files as Doxygen inputs has an auto-linking side
+  effect — references like `` [`CHANGELOG.md`](CHANGELOG.md) `` only
+  resolve if the target file is also in `INPUT`. Useful property
+  (cross-linking between README and CHANGELOG on the rendered site),
+  but a warning source if forgotten.
+- `find_package(Doxygen OPTIONAL_COMPONENTS dot)` (plural even for a
+  single component) is the modern CMake pattern. It sets both
+  `DOXYGEN_FOUND` and `DOXYGEN_DOT_FOUND`, letting the config query
+  graphviz presence without a second `find_program`.
+- `configure_file(... @ONLY)` with `@PROJECT_VERSION@`, `@PROJECT_NAME@`
+  substitution keeps the Doxyfile free of CMake syntax — the
+  generated file opens cleanly in editors with Doxyfile syntax
+  highlighting, which the raw source does not.
+
+### Next
+Step 05 will add GitHub Actions CI — Linux (gcc + clang) and macOS
+build-and-test jobs that run `cmake --build` + `ctest`, plus a
+separate Linux job that builds the Doxygen docs. CUDA stays off the
+matrix until Phase 7.
+
+---
+
 ## [Step 03] — `knng::core` public API scaffold (2026-04-17)
 
 ### What

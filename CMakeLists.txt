@@ -59,6 +59,24 @@ target_compile_features(knng_headers INTERFACE cxx_std_20)
 add_library(knng::headers ALIAS knng_headers)
 
 # --------------------------------------------------------------------------- #
+# Testing
+# --------------------------------------------------------------------------- #
+# `include(CTest)` defines the `BUILD_TESTING` cache option (default ON) and
+# calls `enable_testing()`. The actual GoogleTest download + test targets
+# are only wired up when we are the top-level project AND tests are
+# requested — downstream consumers pulling knng via FetchContent get the
+# library without incurring the GoogleTest clone.
+option(KNNG_BUILD_TESTS "Build knng's unit tests" ${PROJECT_IS_TOP_LEVEL})
+
+if(KNNG_BUILD_TESTS)
+    include(CTest)
+    if(BUILD_TESTING)
+        include(FetchGoogleTest)
+        add_subdirectory(tests)
+    endif()
+endif()
+
+# --------------------------------------------------------------------------- #
 # Subdirectories
 # --------------------------------------------------------------------------- #
 add_subdirectory(tools)

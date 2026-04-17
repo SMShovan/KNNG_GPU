@@ -15,9 +15,10 @@ design decisions behind each step.
 
 ## Status
 
-Very early. This repository currently contains only the build scaffolding
-and a `hello_knng` smoke-test executable. See the changelog for the
-up-to-date step count.
+Very early. This repository currently contains the build scaffolding, a
+`hello_knng` smoke-test executable, and a GoogleTest-based `ctest` suite
+with a version-header smoke test. See the changelog for the up-to-date
+step count.
 
 ## Design goals
 
@@ -55,16 +56,22 @@ AppleClang 14+).
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/bin/hello_knng
+ctest --test-dir build --output-on-failure
 ```
 
 `hello_knng` prints the library version and the compile-time build
 configuration; use it as a smoke test after changing the build system.
+`ctest` runs the GoogleTest suite (currently just `tests/smoke_test.cpp`,
+which verifies that the generated `knng/version.hpp` is reachable from a
+test target and internally consistent).
 
 ### Configure-time options
 
-| Option                        | Default | Effect                                      |
-|-------------------------------|---------|---------------------------------------------|
-| `KNNG_WARNINGS_AS_ERRORS`     | `ON`    | Treat compiler warnings as errors           |
+| Option                        | Default                 | Effect                                                      |
+|-------------------------------|-------------------------|-------------------------------------------------------------|
+| `KNNG_WARNINGS_AS_ERRORS`     | `ON`                    | Treat compiler warnings as errors                           |
+| `KNNG_BUILD_TESTS`            | `ON` (top-level build)  | Build the GoogleTest suite and fetch GoogleTest if needed   |
+| `KNNG_GOOGLETEST_TAG`         | `v1.15.2`               | Git tag used by `FetchContent` for GoogleTest               |
 
 More options will be added as later steps introduce CUDA, MPI, NCCL, etc.
 

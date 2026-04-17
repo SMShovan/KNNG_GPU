@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# Build artifacts
+# ---------------------------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+out/
+install/
+
+# ---------------------------------------------------------------------------
+# CMake temporary files (in case of in-source misconfiguration)
+# ---------------------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# ---------------------------------------------------------------------------
+# Benchmark datasets — downloaded on demand, not versioned.
+# See tools/download_*.sh for provisioning scripts.
+# ---------------------------------------------------------------------------
+datasets/
+
+# Cached ground-truth files produced by the benchmark harness.
+*.gt
+
+# Benchmark output + profiling dumps.
+benchmarks/results/
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# ---------------------------------------------------------------------------
+# Compiled objects / libraries
+# ---------------------------------------------------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# ---------------------------------------------------------------------------
+# Editor / OS artifacts
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.code-workspace
+.cache/
+
+# ---------------------------------------------------------------------------
+# Local-only preparation material (notes, PDFs, etc.)
+# ---------------------------------------------------------------------------
+LLNL Internship Preparation/
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log

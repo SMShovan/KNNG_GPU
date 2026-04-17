@@ -1,0 +1,24 @@
+// Generated from cmake/version.hpp.in — DO NOT EDIT BY HAND.
+//
+// Configured at CMake-time into:
+//     ${CMAKE_BINARY_DIR}/generated/knng/version.hpp
+//
+// Consumers should include "knng/version.hpp" after linking the
+// `knng::headers` interface target.
+
+#pragma once
+
+/// @file
+/// @brief Compile-time project version information.
+
+/// Major version component.
+#define KNNG_VERSION_MAJOR @knng_VERSION_MAJOR@
+
+/// Minor version component.
+#define KNNG_VERSION_MINOR @knng_VERSION_MINOR@
+
+/// Patch version component.
+#define KNNG_VERSION_PATCH @knng_VERSION_PATCH@
+
+/// Dotted version string, e.g. "0.1.0".
+#define KNNG_VERSION_STRING "@knng_VERSION@"

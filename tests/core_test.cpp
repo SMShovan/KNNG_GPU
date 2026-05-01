@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 
+#include "knng/core/dataset.hpp"
 #include "knng/core/distance.hpp"
 #include "knng/core/graph.hpp"
 #include "knng/core/types.hpp"
@@ -92,6 +93,38 @@ TEST(Knng, MutatingRowViewIsReflectedInUnderlyingStorage)
 
     EXPECT_EQ(g.neighbors[2], knng::index_t{7});
     EXPECT_EQ(g.neighbors[3], knng::index_t{9});
+}
+
+TEST(Dataset, ConstructedShapeMatchesArguments)
+{
+    const knng::Dataset ds(5, 4);
+    EXPECT_EQ(ds.n, std::size_t{5});
+    EXPECT_EQ(ds.d, std::size_t{4});
+    EXPECT_EQ(ds.data.size(), std::size_t{20});
+}
+
+TEST(Dataset, RowViewsAreContiguousWithStrideD)
+{
+    knng::Dataset ds(3, 4);
+    EXPECT_EQ(ds.row(0).size(), std::size_t{4});
+    EXPECT_EQ(ds.row(2).size(), std::size_t{4});
+
+    // Row i+1 begins exactly d floats after row i.
+    EXPECT_EQ(ds.row(1).data(), ds.row(0).data() + 4);
+    EXPECT_EQ(ds.row(2).data(), ds.row(0).data() + 8);
+}
+
+TEST(Dataset, MutatingRowViewIsReflectedInUnderlyingStorage)
+{
+    knng::Dataset ds(2, 3);
+    auto row = ds.row(1);
+    row[0] = 1.5f;
+    row[1] = 2.5f;
+    row[2] = 3.5f;
+
+    EXPECT_FLOAT_EQ(ds.data[3], 1.5f);
+    EXPECT_FLOAT_EQ(ds.data[4], 2.5f);
+    EXPECT_FLOAT_EQ(ds.data[5], 3.5f);
 }
 
 } // namespace

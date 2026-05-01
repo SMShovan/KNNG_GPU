@@ -12,6 +12,103 @@ independent of the code diff.
 
 ---
 
+## [Step 07] — Core-types residue: `knng::Dataset` (2026-05-01)
+
+### What
+- Added `include/knng/core/dataset.hpp` with the `knng::Dataset` POD
+  struct: `std::size_t n`, `std::size_t d`, `std::vector<float> data`,
+  plus `row(i)` accessors that return a `std::span<const float>` /
+  `std::span<float>` view of length `d`. Layout is row-major, no
+  padding, contiguous in `data`.
+- A two-argument constructor `Dataset(n, d)` value-initializes storage
+  to length `n*d`. Default constructor produces an empty (0×0) dataset
+  for placeholder use.
+- Added three GoogleTest cases to `tests/core_test.cpp`:
+  `Dataset.ConstructedShapeMatchesArguments`,
+  `Dataset.RowViewsAreContiguousWithStrideD`,
+  `Dataset.MutatingRowViewIsReflectedInUnderlyingStorage`.
+- `ctest` is now 13/13 green (was 10/10).
+
+### Why
+The Plan's original "Step 6 — Core types" task was largely subsumed
+by in-repo Step 03, which shipped `index_t`, `dim_t`, the `Distance`
+concept, the built-in metrics, and the `Knng` adjacency struct. The
+single remaining residue was the input-side container — a row-major
+feature matrix that every later algorithm (CPU brute-force in Step 10,
+NN-Descent, the GPU pipelines) consumes.
+
+Pinning the layout *now*, before any algorithmic code lands, means
+every later builder takes `const Dataset&` from day one. Retrofitting
+the type later — once five different algorithms each have their own
+"matrix of floats" notion — would force a coordinated rewrite. Cheap
+to do at Step 07; expensive at Step 27.
+
+The shape mirrors `Knng` deliberately: both are flat row-major
+contiguous, both expose `row(i)` / `neighbors_of(i)` / `distances_of(i)`
+returning `std::span`. A reader who has internalized one has
+internalized the other.
+
+### Tradeoff
+- **Plain struct, public members.** `Dataset` could have been a class
+  with a private buffer and accessor methods. Rejected: every consumer
+  (BLAS calls, GPU H2D transfers, memory-mapped loaders, profiling
+  tools) wants direct access to `data.data()`. A class wrapper would
+  add ceremony without enforcing any invariant beyond
+  `data.size() == n*d`, which is already trivially checked at the
+  constructor and never violated thereafter.
+- **`std::vector<float>`, not aligned/pinned storage.** No 64-byte
+  alignment, no CUDA pinned memory, no `std::aligned_storage`. Phase 7
+  will introduce a `DeviceBuffer<T>` for GPU residency and Phase 4 may
+  introduce NUMA-aware allocators; those are *additional* containers,
+  not replacements. A `Dataset` is the host-side reference shape, and
+  `std::vector` is the simplest thing that works for it.
+- **Own header, not appended to `types.hpp`.** Followed Step 03's
+  convention: scalar aliases live in `types.hpp`, composite types
+  each get a dedicated header (`graph.hpp` for `Knng`, now
+  `dataset.hpp` for `Dataset`). Slightly more files, but
+  `#include "knng/core/dataset.hpp"` is more honest than
+  `#include "knng/core/types.hpp"` for code that only wants the
+  `Dataset` type.
+- **No `DistanceMetric` runtime enum.** The plan explicitly says
+  "no runtime `DistanceMetric` enum in Phase 1 — compile-time
+  dispatch through the concept is the canonical path." Honoured.
+  When the CLI lands at Step 13, the algorithm/metric strings will
+  be turned into compile-time choices by a `if/else` over enum-like
+  `std::string_view` constants in the CLI dispatcher, not by a
+  runtime virtual interface inside the algorithms.
+
+### Learning
+- Repeating the `Knng`-style `row(i)` accessor pattern was a small but
+  noticeable ergonomic win even at zero algorithmic content: the test
+  cases for `Dataset` came out as near-mechanical translations of the
+  `Knng` row-view tests. Convention consistency pays off as soon as
+  the second instance of the pattern appears.
+- The `dataset.hpp` originally `#include`d `knng/core/types.hpp` "for
+  context," but it never used `index_t` or `dim_t` — the row count
+  and dimensionality are `std::size_t` (matching the constructor /
+  `std::vector<float>::size_type`). A leftover include that the type
+  doesn't need is exactly the kind of include-what-you-use violation
+  the project's clangd integration immediately flagged. Removed.
+- `n` and `d` as field names are short, but they are the canonical
+  symbols in every ANN paper (and in the `(n, d)` shape vocabulary of
+  Numpy / cuBLAS / faiss). Spelling them `num_points` and
+  `dimensions` would be more discoverable for a first-time reader but
+  would add visual noise in every algorithmic file that touches them.
+  Choice: paper-canonical names, with the meaning documented in the
+  Doxygen `///<` comment next to each field.
+
+### Next
+Step 08 begins the real algorithmic work: a scalar `squared_l2`
+function with the C-style `(const float*, const float*, std::size_t)`
+signature that later SIMD and GPU kernels will specialize. The
+`L2Squared` functor stays as the canonical span-based interface; the
+new free function is the lower-level building block that the functor
+(and future SIMD / CUDA implementations) can dispatch into. Tests
+expand to cover zero distance to self, hand-verified pairs, and
+dimension-0 / dimension-1 edge cases.
+
+---
+
 ## [Step 06] — Coding style guide + CHANGELOG template (2026-04-17)
 
 ### What

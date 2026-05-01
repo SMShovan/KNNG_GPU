@@ -12,6 +12,156 @@ independent of the code diff.
 
 ---
 
+## [Step 11] — Dataset I/O: `.fvecs` / `.ivecs` / `.bvecs` (2026-05-01)
+
+### What
+- Added `include/knng/io/fvecs.hpp` declaring four loaders:
+  * `Dataset load_fvecs(path)` — float32 records → `Dataset`.
+  * `IvecsData load_ivecs(path)` — int32 records → `(n, d, std::vector<int32_t>)`.
+  * `BvecsData load_bvecs(path)` — uint8 records → `(n, d, std::vector<uint8_t>)`.
+  * `Dataset load_bvecs_as_float(path)` — convenience widener so
+    quantised SIFT1B drops into the same `Dataset` consumers.
+- Added `src/io/fvecs.cpp` with the implementation. Anonymous-namespace
+  `MmapFile` RAII wrapper owns an `mmap`-ed read-only view of the
+  file (POSIX `open`/`fstat`/`mmap`/`munmap`/`close`); the
+  `read_vecs_records<Element>` template strips the per-record
+  `int32` dim prefix, validates every prefix matches the first, and
+  copies the element payloads into the destination row-major buffer.
+  Inconsistent prefixes, non-multiple file sizes, empty files, and
+  failed system calls all throw `std::runtime_error` with a message
+  naming the offending file and reason.
+- Promoted `src/CMakeLists.txt`: created a second STATIC library
+  `knng::io` (alias of `knng_io`), `PUBLIC`-linking `knng::core` so
+  consumers transitively pick up `Dataset` and the warnings policy.
+- Added `tests/fvecs_test.cpp` (`test_fvecs`) with seven cases:
+  * Round-trips three records of dim 4 in `.fvecs`, two records of
+    dim 3 in `.ivecs`, and two records of dim 3 in `.bvecs`
+    (asserting both raw bytes and the widened-to-float convenience).
+  * Missing-file, empty-file, inconsistent-dim-prefix, and
+    file-size-not-a-multiple-of-record-size error paths.
+  * A `TempPath` RAII helper materialises each fixture in
+    `std::filesystem::temp_directory_path()` and removes it on
+    destruction; tests run with no network access.
+- Added `tools/download_sift.sh` (executable) — provisioning script
+  that fetches SIFT-small (10K base + 100 query + 100×100 ground
+  truth) from the IRISA `corpus-texmex` site into the gitignored
+  `datasets/siftsmall/` directory. `FORCE=1` re-downloads;
+  `DEST=...` overrides the destination root. The build never invokes
+  this script.
+- `ctest` is now 40/40 green (was 33/33); a `fvecs` label joins the
+  CTest summary.
+
+### Why
+Phase 1's brute-force builder (Step 10) needs real input to be more
+than a toy — and so does the benchmark harness landing at Step 12.
+The four formats above cover every dataset the project's plan
+mentions, and they are also the interchange formats `ann-benchmarks`,
+faiss, and cuVS all consume. Implementing them now means every
+later step can take a `Dataset` path on the command line (Step 13)
+without anyone needing to hand-write a loader twice.
+
+`mmap` over `read()` was the plan's choice and is the right one for
+two reasons. First, the SIFT1B base file is 92 GiB — pulling the
+whole thing through a `read()` would either thrash a single buffer
+or force a streaming reader (and a streaming `Dataset` builder is a
+much bigger surface area than the current "row-major contiguous"
+contract assumes). With `mmap`, the OS demand-pages the file under
+memory pressure for free, and the loader copy still happens but only
+for the pages the loader actually touches. Second, on macOS `read()`
+of a multi-gigabyte file goes through the unified buffer cache the
+same way `mmap` would — choosing `read()` would buy us nothing in
+exchange for the syscall cost.
+
+The cleanly-separated `IvecsData` / `BvecsData` types (instead of
+forcing both into `Dataset`) reflect that ground-truth files are not
+"datasets" in any algorithmic sense — they are reference labels, and
+collapsing the type would obscure that distinction at every consumer
+site. The `load_bvecs_as_float` widener exists for the one case where
+the byte width really *should* be promoted (CPU brute-force on
+SIFT1B); callers who need raw bytes still get them through
+`load_bvecs`.
+
+### Tradeoff
+- **POSIX `mmap` only — no Windows `MapViewOfFile`.** The CI matrix
+  is Linux + macOS; the project's target hardware is Linux/HPC and
+  ultimately MI350A APU. A Windows port would need a parallel
+  `MmapFile` implementation behind a `#ifdef`, plus a CMake test
+  surface that nobody has volunteered to maintain. Deferred until a
+  Windows user appears.
+- **Copy on load, not zero-copy alias.** A zero-copy loader would
+  hand the consumer a `std::span<const float>` *and* the underlying
+  `MmapFile` lifetime, which then has to live somewhere. The
+  destination layout has stride `d` while the file layout has stride
+  `4 + d * sizeof(element)`, so a true zero-copy `Dataset` would
+  require either (a) per-row spans (defeats the point of a flat
+  `data` vector that GPU H2D / cuBLAS calls want), or (b) a `Dataset`
+  variant that doesn't own its storage. Either is a much larger
+  refactor than the project needs right now. The single-pass copy is
+  bandwidth-bound and finishes in ~50 ms on SIFT1M (512 MiB at
+  ~10 GB/s). When SIFT1B forces the question, Phase 11 can revisit.
+- **No CRC / hash check on the loaded file.** The loader validates
+  *structural* consistency (every dim prefix matches the first, file
+  size divides cleanly into records) but does not validate that the
+  payload bytes are what the dataset's publisher intended. The
+  `download_sift.sh` script could `shasum -a 256` against a pinned
+  hash; deferred until a wrong-file incident happens (the IRISA
+  files have been stable for 15 years).
+- **Loader returns by value, not output parameter.** `Dataset` and
+  the two struct types are RVO-friendly and not enormous (the
+  `data` vector's heap pointer moves, not the `n*d` floats). The
+  prevailing project style is "return-by-value POD types"; sticking
+  with it keeps call sites readable. A future bandwidth-sensitive
+  loader could grow an in-place overload that takes `Dataset& out`.
+- **Anonymous-namespace `MmapFile` and `read_vecs_records`** instead
+  of public utilities. Both are implementation details — exposing
+  them would invite users to depend on the POSIX-only path before
+  the cross-platform abstraction exists. Anonymous namespace gives
+  internal linkage without the boilerplate of a `detail::` namespace
+  in a private header.
+
+### Learning
+- `[[nodiscard]]` on the loaders interacted badly with GoogleTest's
+  `EXPECT_THROW(expr, type)` — the macro evaluates `expr` once but
+  discards the value, which `[[nodiscard]]` flags under `-Werror`.
+  Wrapping the call as `EXPECT_THROW(static_cast<void>(expr), type)`
+  is the canonical fix; a future `KNNG_VOID_CAST` macro or a small
+  test helper could hide the noise if it appears more than a few
+  times. Pattern worth pinning here.
+- `MAP_FAILED` is `((void*)-1)`, not `nullptr`. Comparing the `mmap`
+  return value against `nullptr` is a classic bug that compiles
+  cleanly and silently corrupts memory on the failure path. The
+  guard is `if (p == MAP_FAILED) ...`.
+- The "inconsistent dim prefix" test had to be carefully constructed:
+  if the second record's payload had matched the first record's
+  dim-bytes, the file size would still be a multiple of the *first*
+  record size and the inconsistency would only show up at
+  prefix-validation time. Picking 4 → 3 makes the file size 32 bytes
+  total, which is `(4 + 4*4) + (4 + 3*4) = 20 + 16` and divides
+  cleanly by neither 20 nor 16 — *but* would divide by 32 if we
+  treated it as a single record of dim 7, a tantalising near-miss.
+  The test passes because the loader infers `d=4` from the first
+  prefix and then immediately hits the prefix mismatch. Worth
+  writing the test that way to ensure the prefix-validation branch
+  is actually exercised, not the file-size branch.
+- The `TempPath` PID-and-counter naming scheme is enough for our
+  single-process test suite. If we ever fork or spawn worker
+  processes (Step 26's `std::thread` study, eventual Phase 6 MPI
+  tests), the helper will need to fold in a `std::random_device` or
+  an `mkstemp`-style reservation. Documented in the helper's
+  comment, not enforced.
+
+### Next
+Step 12 introduces the benchmarking harness skeleton. A small
+`benchmarks/CMakeLists.txt` and `benchmarks/bench_brute_force.cpp`
+linked against Google Benchmark (fetched via a new
+`cmake/FetchGoogleBenchmark.cmake` mirroring the GoogleTest helper)
+will load a `Dataset` from disk and time `brute_force_knn`. No
+recall numbers yet — that arrives at Step 14. The benchmark target
+is opt-in via `-DKNNG_BUILD_BENCHMARKS=ON` so the GoogleTest cycle
+in CI is unaffected.
+
+---
+
 ## [Step 10] — Naive CPU brute-force KNN (2026-05-01)
 
 ### What

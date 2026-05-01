@@ -94,3 +94,24 @@ gtest_discover_tests(test_brute_force
         LABELS "brute_force"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_fvecs` exercises the .fvecs / .ivecs / .bvecs loaders against
+# tiny in-memory fixtures written to the OS temp directory. No
+# network I/O — the SIFT-small download is a separate ad-hoc tool.
+add_executable(test_fvecs fvecs_test.cpp)
+target_link_libraries(test_fvecs
+    PRIVATE
+        knng::io
+        GTest::gtest_main
+)
+knng_set_warnings(test_fvecs)
+
+set_target_properties(test_fvecs PROPERTIES
+    OUTPUT_NAME "test_fvecs"
+)
+
+gtest_discover_tests(test_fvecs
+    PROPERTIES
+        LABELS "fvecs"
+    DISCOVERY_TIMEOUT 10
+)

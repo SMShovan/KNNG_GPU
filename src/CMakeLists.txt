@@ -21,3 +21,13 @@ add_library(knng_cpu STATIC
 target_link_libraries(knng_cpu PUBLIC knng::core)
 knng_set_warnings(knng_cpu)
 add_library(knng::cpu ALIAS knng_cpu)
+
+# `knng::io` — POSIX-mmap-backed loaders for the `.fvecs` / `.ivecs` /
+# `.bvecs` benchmark file formats. Linux + macOS only (no Windows path
+# yet); the project's CI matrix does not include Windows.
+add_library(knng_io STATIC
+    io/fvecs.cpp
+)
+target_link_libraries(knng_io PUBLIC knng::core)
+knng_set_warnings(knng_io)
+add_library(knng::io ALIAS knng_io)

@@ -20,8 +20,7 @@
 /// Example invocations:
 ///   ./build/bin/bench_brute_force
 ///   ./build/bin/bench_brute_force --benchmark_format=json
-///   KNNG_BENCH_FVECS=datasets/siftsmall/siftsmall_base.fvecs \
-///       ./build/bin/bench_brute_force --benchmark_filter=Fvecs
+///   KNNG_BENCH_FVECS=datasets/siftsmall/siftsmall_base.fvecs ./build/bin/bench_brute_force --benchmark_filter=Fvecs
 
 #include <cstddef>
 #include <cstdint>

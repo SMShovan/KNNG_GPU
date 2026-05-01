@@ -7,12 +7,7 @@
 /// of C++:
 ///
 /// ```sh
-/// ./build/bin/build_knng \
-///     --dataset datasets/siftsmall/siftsmall_base.fvecs \
-///     --k 10 \
-///     --metric l2 \
-///     --algorithm brute_force \
-///     --output siftsmall_k10.knng
+/// ./build/bin/build_knng --dataset datasets/siftsmall/siftsmall_base.fvecs --k 10 --metric l2 --algorithm brute_force --output siftsmall_k10.knng
 /// ```
 ///
 /// ## Output binary format (version 1)

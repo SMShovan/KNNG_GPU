@@ -12,6 +12,129 @@ independent of the code diff.
 
 ---
 
+## [Step 09] — Bounded top-k buffer `knng::TopK` (2026-05-01)
+
+### What
+- Added `include/knng/top_k.hpp` with `class TopK`:
+  * `explicit TopK(std::size_t k)` — fixed capacity at construction.
+  * `void push(index_t id, float dist)` — admit iff buffer is not yet
+    full, or `dist <` current worst, or `dist ==` worst and `id <`
+    worst's id (deterministic tie-break — see below).
+  * `std::vector<std::pair<index_t, float>> extract_sorted()` — drains
+    the buffer into ascending-distance order; ties broken by ascending
+    id; buffer is empty afterwards.
+  * Inspectors `size()`, `capacity()`, `empty()`.
+- Backed by `std::priority_queue<Entry, std::vector<Entry>, WorseFirst>`
+  where `WorseFirst` is a strict-weak-ordering comparator yielding a
+  max-heap on `(dist, id)` so the worst entry is always at the top
+  for O(log k) eviction.
+- Added a new test binary `tests/top_k_test.cpp` (`test_top_k`) with
+  six cases: empty extract, fewer-than-k retention, the size-k
+  invariant under repeated insertion (10 candidates → 3 smallest),
+  equal-distance tie-break by smaller id, the degenerate `k == 0`
+  buffer (rejects everything), and the post-extract drained state.
+- `ctest` is now 24/24 green (was 18/18). New `top_k` label in the
+  CTest summary.
+
+### Why
+Every nearest-neighbor builder in this project — brute-force at
+Step 10, NN-Descent in Phase 5, every GPU kernel from Phase 7 onward
+— needs to maintain a per-query "best k seen so far" structure.
+Writing it once, in one place, with a clean contract is the right
+move at Step 09: the brute-force builder lands at Step 10 and would
+otherwise inline ten lines of heap-management code into its inner
+loop, only to need them ripped back out at Step 21 when
+`std::partial_sort` becomes a contender.
+
+The deterministic-tie-break rule (`id` strict-less wins on equal
+`dist`) is doing two things at once. First, it lets the brute-force
+builder produce bit-identical output across runs without requiring a
+seeded RNG (Step 16's job) — something the plan explicitly calls out
+as an invariant for Step 10. Second, it gives every later
+implementation (parallel CPU NN-Descent, GPU kernels with atomic
+top-k merges) a single, unambiguous answer to "what does correct
+output look like?" — making elementwise-equality regression tests
+possible without recall-based fuzz testing.
+
+The "max-heap on distance" choice is the textbook one: admission is
+a single comparison against `top()`, eviction is `pop()` + `push()`,
+both `O(log k)`. For `k ≤ 100` (the regime every benchmark we care
+about lives in), this is competitive with linear-scan partial-sort
+strategies and uses strictly less memory than holding a dense
+distance vector.
+
+### Tradeoff
+- **`std::priority_queue`, not a hand-rolled heap.** A hand-rolled
+  `std::vector` + `std::push_heap` / `std::pop_heap` would let us hold
+  scratch memory across calls (`extract_sorted` would zero `size_` and
+  reuse the underlying vector) and would expose the buffer for
+  benchmarking SIMD-friendly bulk-merge variants in Phase 4. Deferred
+  — Step 09 prioritises clarity and correctness, and the standard
+  container both compiles cleanly under `-Wconversion -Werror` and
+  reads obviously to a future contributor. The hand-rolled variant
+  will land as part of Step 21's partial_sort comparison.
+- **Deterministic tie-break on `id`, not insertion order.** Insertion-
+  order tie-break would let the heap report "the first equal-distance
+  candidate seen wins," which is what FAISS does. Rejected because
+  insertion order depends on the loop schedule (parallelism, NUMA-
+  partitioned scans, GPU thread-block traversal) and would silently
+  break elementwise-equality tests as soon as Step 23's OpenMP loop
+  lands. The id-based rule is a function of inputs only, regardless
+  of evaluation order.
+- **`extract_sorted` drains, instead of returning a snapshot.** A
+  snapshot variant would let callers extract intermediate state
+  during iteration, but the buffer is per-query and per-iteration in
+  every algorithm in the project — drain-and-return matches the
+  call-site pattern exactly. Adding a `peek_sorted_copy()` would be
+  trivial later if a use case appears.
+- **`std::pair<index_t, float>` as the public output element type.**
+  A dedicated `Neighbor { index_t id; float dist; }` POD struct would
+  read more clearly at consumer sites. Considered, but `std::pair` is
+  already the canonical "associative element" type and avoids
+  introducing a new type that the brute-force builder at Step 10 will
+  immediately need to convert to/from when it writes into a `Knng`
+  row. Likely revisited in Phase 5 when the NN-Descent neighbor list
+  introduces an `is_new` flag — that one *will* need a struct.
+- **Header-only at Step 09.** `TopK` is small and `inline` everywhere;
+  there is no out-of-line state. When Step 10 lands the first non-
+  template `.cpp` source file, the question of "should top_k.hpp move
+  to top_k.hpp + top_k.cpp" can be revisited, but the trigger for the
+  split would be code growth that has not yet happened.
+
+### Learning
+- The strict-weak-ordering check on `WorseFirst` is the single
+  easiest place to introduce a heap-corruption bug: returning `true`
+  for `a == b` violates the comparator contract and produces silent
+  garbage at runtime. Writing the tie-break as `a.id < b.id` (strict)
+  on the equal-`dist` branch — never `<=` — is the right pattern.
+  Worth pinning explicitly in the changelog because the symptom of
+  getting it wrong is "tests pass on small inputs, fail on large
+  ones, with no clean reproducer."
+- `[[nodiscard]]` on `extract_sorted` would be desirable, but the
+  function also has the side effect of draining the buffer, so a
+  caller might legitimately call it for the side effect alone. Left
+  off; documented in the `///` block instead.
+- The clangd "unused include" warning on `<utility>` was a false
+  positive — `std::pair` is in the return type but clangd treats it
+  as transitively pulled by `<queue>`. Kept the include explicit
+  because the public API does directly traffic in `std::pair` and
+  pulling it via a coincidental transitive include would be fragile
+  to a future libc++ rearrangement.
+
+### Next
+Step 10 is the first real algorithm: `Knng knng::cpu::brute_force_knn(
+const Dataset&, std::size_t k)`. A triple loop over (query, reference,
+dim) parameterised on the `Distance` concept, using `TopK` as the
+per-query buffer. The output `Knng` rows are sorted ascending by
+distance (free, by way of `extract_sorted`), and tie-broken on
+neighbor id (also free, by way of the Step 09 tie-break rule). The
+test exercises an 8-point synthetic 2-D cluster with hand-verified
+neighbors, plus the `k == 1` and `k > n - 1` edge cases. This is also
+the step that turns `knng::core` from an INTERFACE library into a
+STATIC library with real source files.
+
+---
+
 ## [Step 08] — Scalar `squared_l2` C-style primitive (2026-05-01)
 
 ### What

@@ -50,3 +50,25 @@ gtest_discover_tests(test_core
         LABELS "core"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_top_k` exercises the bounded-size top-k buffer that every
+# nearest-neighbor builder will push candidates into. Header-only at
+# Step 09; lives outside `knng::core` because top-k is a generic
+# utility rather than a member of the public-API surface.
+add_executable(test_top_k top_k_test.cpp)
+target_link_libraries(test_top_k
+    PRIVATE
+        knng::core
+        GTest::gtest_main
+)
+knng_set_warnings(test_top_k)
+
+set_target_properties(test_top_k PROPERTIES
+    OUTPUT_NAME "test_top_k"
+)
+
+gtest_discover_tests(test_top_k
+    PROPERTIES
+        LABELS "top_k"
+    DISCOVERY_TIMEOUT 10
+)

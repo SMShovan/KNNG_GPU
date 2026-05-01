@@ -72,13 +72,30 @@ test target and internally consistent).
 
 ### Configure-time options
 
-| Option                        | Default                 | Effect                                                      |
-|-------------------------------|-------------------------|-------------------------------------------------------------|
-| `KNNG_WARNINGS_AS_ERRORS`     | `ON`                    | Treat compiler warnings as errors                           |
-| `KNNG_BUILD_TESTS`            | `ON` (top-level build)  | Build the GoogleTest suite and fetch GoogleTest if needed   |
-| `KNNG_GOOGLETEST_TAG`         | `v1.15.2`               | Git tag used by `FetchContent` for GoogleTest               |
+| Option                        | Default                 | Effect                                                                         |
+|-------------------------------|-------------------------|--------------------------------------------------------------------------------|
+| `KNNG_WARNINGS_AS_ERRORS`     | `ON`                    | Treat compiler warnings as errors                                              |
+| `KNNG_BUILD_TESTS`            | `ON` (top-level build)  | Build the GoogleTest suite and fetch GoogleTest if needed                      |
+| `KNNG_GOOGLETEST_TAG`         | `v1.15.2`               | Git tag used by `FetchContent` for GoogleTest                                  |
+| `KNNG_BUILD_BENCHMARKS`       | `OFF`                   | Build the Google-Benchmark-driven benchmark suite (fetches Google Benchmark)   |
+| `KNNG_GOOGLEBENCHMARK_TAG`    | `v1.9.1`                | Git tag used by `FetchContent` for Google Benchmark                            |
 
 More options will be added as later steps introduce CUDA, MPI, NCCL, etc.
+
+### Benchmarks
+
+The benchmark suite is opt-in:
+
+```sh
+cmake -B build -DKNNG_BUILD_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target bench_brute_force
+./build/bin/bench_brute_force --benchmark_format=json
+```
+
+`bench_brute_force` runs `knng::cpu::brute_force_knn` over a deterministic
+synthetic dataset across several `(n, d)` sizes. Set
+`KNNG_BENCH_FVECS=path/to/file.fvecs` to also benchmark over a real
+on-disk dataset (see `tools/download_sift.sh` for SIFT-small).
 
 ### Documentation
 

@@ -12,6 +12,147 @@ independent of the code diff.
 
 ---
 
+## [Step 12] — Benchmark harness skeleton (2026-05-01)
+
+### What
+- Added `cmake/FetchGoogleBenchmark.cmake` — pinned to Google
+  Benchmark `v1.9.1`, source-fetched via `FetchContent`, mirroring
+  the policy of `cmake/FetchGoogleTest.cmake` (no system discovery,
+  no installs from this project, upstream's own self-tests disabled,
+  `BENCHMARK_DOWNLOAD_DEPENDENCIES=OFF` so the upstream build does
+  not try to pull its own GoogleTest copy).
+- Added `benchmarks/CMakeLists.txt` and the first benchmark binary
+  `benchmarks/bench_brute_force.cpp`. Two registered cases:
+  * `BM_BruteForceL2_Synthetic` — runs over a deterministic
+    `Uniform[-1, 1]` dataset across the cartesian product of
+    `n ∈ {256, 512, 1024}` × `d ∈ {32, 128}`. Reports wall-time and
+    a `items_per_second` counter computed from `n * (n - 1)` distance
+    computations per `brute_force_knn` call.
+  * `BM_BruteForceL2_Fvecs` — driven by the `KNNG_BENCH_FVECS`
+    environment variable; loads the named `.fvecs` file via
+    `knng::io::load_fvecs` and benchmarks brute-force on it.
+    `state.SkipWithError(...)` when the env var is unset or the load
+    fails — the case stays registered but does not produce
+    misleading numbers.
+- New build option `KNNG_BUILD_BENCHMARKS` (default `OFF`) at the
+  root `CMakeLists.txt`. When `ON`, includes
+  `FetchGoogleBenchmark.cmake` and `add_subdirectory(benchmarks)`;
+  when `OFF`, the standard developer loop and the CI matrix pay
+  zero FetchContent / build cost.
+- README updated with a new **Benchmarks** subsection and two new
+  rows in the configure-time options table
+  (`KNNG_BUILD_BENCHMARKS`, `KNNG_GOOGLEBENCHMARK_TAG`).
+- Smoke-ran on the dev box: six synthetic configurations completed
+  in well under a second each, throughput climbs cleanly from ~58 M
+  comparisons/s on `(256, 32)` to ~85 M on `(1024, 32)`, and drops
+  to ~14 M on the higher-dimensionality `(*, 128)` cases — exactly
+  the cache-bound shape one expects from a triple-loop
+  implementation. No reported errors. ctest unaffected (still 40/40
+  green).
+
+### Why
+The benchmark harness has to exist *before* the optimisations it
+will measure. Two things follow from that:
+
+1. **Pipeline first, numbers second.** Step 12 is explicitly a
+   skeleton: the bench compiles, runs, produces JSON output. No
+   recall numbers, no peak-memory counters, no plot-rendering
+   helper — those land at Steps 14 / 15. Trying to ship the full
+   metric set in one step would couple the harness wiring to half of
+   Phase 2 and turn an afternoon into a week.
+2. **Synthetic baseline that does not require the SIFT download.**
+   A benchmark that requires `tools/download_sift.sh` to have been
+   run is a benchmark that produces zero useful signal in CI and on
+   a fresh checkout. The synthetic configuration runs anywhere with
+   no setup; the real-dataset case is opt-in via env var. Both
+   shapes are exercised by the same TU so neither path can rot
+   without the other noticing.
+
+The opt-in build flag (`KNNG_BUILD_BENCHMARKS=OFF` by default) is
+pure courtesy: a contributor running `cmake -B build && cmake --build
+build && ctest` should not pay the Google Benchmark FetchContent
+cost (~10 s of clone + compile on a cold cache) for a target they
+did not ask for. CI keeps benchmarks off the matrix until Phase 2
+introduces a regression-baseline JSON; turning them on is one CMake
+flag away.
+
+### Tradeoff
+- **Synthetic data, not a checked-in tiny `.fvecs` fixture.** A
+  small (e.g. 256×32) `.fvecs` file committed into `tests/data/`
+  would have made the `*_Fvecs` benchmark run unconditionally. But
+  the project explicitly gitignores binary datasets, and committing
+  even a tiny one would be the camel's nose for someone later
+  committing a 100 MB SIFT-small. The env-var-gated benchmark is the
+  honest version.
+- **`std::mt19937_64` for synthetic generation, not the project's
+  future `XorShift64`.** Step 16 will introduce the project-wide
+  RNG wrapper. Until it lands, picking a literal `std::mt19937_64`
+  with seed 42 is the least-surprising choice — every C++ developer
+  recognises it, the bench's output is deterministic, and the
+  one-line swap to `knng::random::XorShift64` at Step 16 is trivial.
+  Documented in the bench source itself.
+- **`items_per_second` reported as "distance computations / s",
+  not "queries / s".** Both are defensible, and Phase 3 / 7
+  benchmark writeups will likely report both. Picking the
+  metric-independent throughput now means cross-`d` comparisons are
+  apples-to-apples without normalising; cross-`k` comparisons (when
+  Step 14 lands recall) will need the `n / time` form. Adding a
+  second counter then is one line.
+- **No `BENCHMARK_F` fixture or per-test data caching.** The
+  benchmark builds the dataset once per registered case (in the
+  body of the bench function), not once per iteration — Google
+  Benchmark's iteration loop is the inner `for (auto _ : state)`
+  block. A fixture would let multiple bench cases share one
+  dataset and reduce setup time, but for the (n, d) shapes we
+  benchmark today the dataset construction is sub-millisecond. Cost
+  not yet worth the abstraction.
+- **Bench TUs are warning-policed; Google Benchmark's are not.**
+  Same policy as GoogleTest. Upstream GB does not compile cleanly
+  under `-Wconversion -Wold-style-cast -Werror`, and adding a
+  tactical `BENCHMARK_ENABLE_WERROR=OFF` (which we did) plus
+  refraining from calling `knng_set_warnings()` on the upstream
+  targets keeps our policy applied to our code only.
+
+### Learning
+- Google Benchmark's CMake build defaults to a hidden side effect:
+  if it can't find `gtest` it tries to download its own copy. The
+  symptom on a fresh build was a confusing second GoogleTest clone
+  appearing in `_deps/` next to ours. The fix —
+  `BENCHMARK_DOWNLOAD_DEPENDENCIES=OFF` — is documented but not
+  prominent. Worth pinning here so the next FetchContent integration
+  in this project knows to look for an analogous flag.
+- `state.SkipWithError(...)` is the right way to gracefully handle
+  "the input this case needs is not available" — `state.SkipForTest`
+  is the close cousin for tests, and forgetting to `return` after
+  `SkipWithError` produces a benchmark that "skips" but then runs
+  anyway with garbage state. The `return` after every
+  `SkipWithError` in `BM_BruteForceL2_Fvecs` is load-bearing.
+- The synthetic numbers immediately reveal the dimensionality
+  scaling penalty (`(n=1024, d=32)` reports ~85 Mcomp/s vs
+  `(n=1024, d=128)` reports ~14 Mcomp/s — a ~6× drop on a 4×
+  dimensionality bump). That is exactly the cache-pressure
+  signature the Phase 3 SoA + tiling steps will attack. Pinning the
+  baseline here means Step 19's tiling commit can quote a
+  before/after number against this same harness, no re-runs needed.
+- Apple Silicon's "10 X 24 MHz CPU s" line in the bench banner is
+  a known Google Benchmark quirk on macOS — `sysctl
+  hw.cpufrequency` does not exist on M-series, so GB falls back to
+  reporting `0` formatted in MHz. Cosmetic only; affects metadata,
+  not measurements. The bench banner now warns about this on every
+  run; deferred to a documentation note.
+
+### Next
+Step 13 closes Phase 1 with the end-to-end CLI: `tools/build_knng`,
+a small command-line program that takes `--dataset path.fvecs --k N
+--metric l2 --algorithm brute_force --output graph.bin`, loads the
+dataset, builds the graph, and writes a binary representation to
+disk. The output format is documented in the source so future
+loaders (and the eventual Python bindings in Phase 13) can read it.
+This is the first commit where a user can do something useful with
+the project without writing a line of C++.
+
+---
+
 ## [Step 11] — Dataset I/O: `.fvecs` / `.ivecs` / `.bvecs` (2026-05-01)
 
 ### What

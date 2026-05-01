@@ -90,6 +90,19 @@ if(KNNG_BUILD_TESTS)
 endif()
 
 # --------------------------------------------------------------------------- #
+# Benchmarks
+# --------------------------------------------------------------------------- #
+# Opt-in (default OFF) so the standard developer loop and the CI matrix
+# don't pay the Google Benchmark FetchContent + build cost unless they
+# actually want benchmark numbers. Enable with `-DKNNG_BUILD_BENCHMARKS=ON`.
+option(KNNG_BUILD_BENCHMARKS "Build knng's micro and end-to-end benchmarks" OFF)
+
+if(KNNG_BUILD_BENCHMARKS)
+    include(FetchGoogleBenchmark)
+    add_subdirectory(benchmarks)
+endif()
+
+# --------------------------------------------------------------------------- #
 # Build summary (helpful when `ccmake` or CI logs are the only feedback).
 # --------------------------------------------------------------------------- #
 message(STATUS "")

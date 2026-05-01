@@ -12,6 +12,155 @@ independent of the code diff.
 
 ---
 
+## [Step 10] — Naive CPU brute-force KNN (2026-05-01)
+
+### What
+- Added `include/knng/cpu/brute_force.hpp` declaring and defining the
+  function template `template <Distance D> Knng brute_force_knn(
+  const Dataset&, std::size_t k, D distance = D{})`. Triple loop over
+  `(query, reference, dim)`, parameterised on the `Distance` concept,
+  using `knng::TopK` as the per-query buffer. Argument validation
+  throws `std::invalid_argument` on `ds.n == 0`, `k == 0`, or
+  `k > ds.n - 1`.
+- Added `src/cpu/brute_force.cpp` providing explicit template
+  instantiations for `L2Squared` and `NegativeInnerProduct`. This
+  gives the new static library a real translation unit and lets the
+  two common metric paths skip per-consumer instantiation.
+- Promoted `src/CMakeLists.txt`: created the `knng_cpu` STATIC
+  library (alias `knng::cpu`), `PUBLIC`-linking `knng::core` so
+  consumers transitively pick up headers + C++20 + warnings. The
+  pre-existing `knng_core` INTERFACE library is untouched.
+- Added `tests/brute_force_test.cpp` (`test_brute_force`) with nine
+  GoogleTest cases:
+  * Output shape matches `(ds.n, k)`.
+  * Three hand-verified rows on the 8-point two-cluster dataset
+    (point 0, point 4, point 7) — exercises the equal-distance
+    tie-break invariant.
+  * Self-is-never-a-neighbor invariant on every row.
+  * Rows-are-sorted-ascending invariant on every row.
+  * `k == 1` returns the single closest neighbor (deterministic on
+    ties).
+  * `NegativeInnerProduct` metric path is exercised end-to-end.
+  * The three `std::invalid_argument` boundary cases.
+- `ctest` is now 33/33 green (was 24/24); a `brute_force` label joins
+  the existing labels in the CTest summary.
+
+### Why
+This is the first algorithm in the project, and every later
+optimisation — vectorised distance kernels, blocked tiling, BLAS-as-
+distance, OpenMP, SIMD, GPU, NN-Descent, multi-GPU NEO-DNND — will
+use this function's output as its correctness reference. Three
+properties make it a good reference:
+
+1. **Pure function of inputs.** No RNG, no parallel scheduling, no
+   timing dependence. Two runs with the same `(Dataset, k, Distance)`
+   produce bit-identical `Knng` output. Step 09's id-based tie-break
+   is what makes this true even when multiple neighbors are
+   equidistant — without it, the brute-force order would depend on
+   the iteration order, and the elementwise-equality regression tests
+   that Phases 4 / 7 / 9 will rely on would silently start failing
+   the moment a parallel reorder lands.
+2. **Triple-loop transparency.** A reader who has not seen the
+   project before can convince themselves of the algorithm's
+   correctness by reading the function body once. No tactic, no
+   tiling, no special cases. The CHANGELOG entries for Phase 3 will
+   measure every optimisation against this exact baseline; making
+   the baseline obviously correct makes every later optimisation's
+   speedup credible.
+3. **Uses every Phase-1 type at once.** `Dataset`, `Knng`, the
+   `Distance` concept, `L2Squared`, `TopK`, and `index_t` all appear
+   in this one function. If any of those interfaces is wrong or
+   awkward, this commit is where it shows up — and now is the
+   cheapest possible time to fix it.
+
+The function-template-on-`Distance` shape (rather than a runtime
+metric enum) is the convention the project pinned in the Step 03
+"convention divergences resolved" decision and re-affirmed in
+Step 07. No virtual dispatch in the inner loop; compile-time
+dispatch through the concept is canonical.
+
+### Tradeoff
+- **Header-only template plus explicit-instantiation `.cpp`.** Three
+  alternative organisations were considered:
+  1. *Pure header* — every consumer pays the parsing /
+     instantiation cost. Rejected: the brute-force body is small now,
+     but Phase 3 will grow it (norm precomputation, tile parameters,
+     per-row scratch). The static library is the right home for that
+     growth.
+  2. *Pure `.cpp` with non-template `brute_force_knn_l2`* — would
+     drop the `Distance` parameterisation. Rejected on the same
+     grounds as the runtime-enum approach: every later algorithm
+     (NN-Descent, GPU local-join) is going to want the same
+     parameterisation, and giving the reference function a different
+     shape from its successors would invite a partial port later.
+  3. *Header-only template + explicit instantiations in the `.cpp`*.
+     **Chosen.** The template stays available for any user-supplied
+     `Distance` functor; the two built-in metrics are pre-compiled in
+     `libknng_cpu.a`. Implicit instantiation of the same template in
+     a consumer TU does not collide with the explicit instantiation
+     because the implicit version has weak linkage and the explicit
+     has strong linkage.
+- **Self-match excluded by `if (r == q) continue`.** The alternative
+  is to compute every distance and rely on the `q == q` distance of
+  zero being smaller than every real neighbor's distance, then drop
+  the first neighbor. Rejected: distinguishing "self at distance 0"
+  from "exact duplicate at distance 0" silently is exactly the kind
+  of subtle bug that bites once a dataset has duplicates (which SIFT
+  does). The explicit `continue` is one branch per inner iteration on
+  a dataset where every other inner iteration is a multi-multiply-add
+  loop — measurable cost is well under 1%.
+- **Argument validation throws, does not assert.** The brute-force
+  function is on the public API surface — callers are downstream
+  user code (eventually pybind11 bindings, eventually a CLI). The
+  STYLE.md error-handling rule is: throw at the API boundary,
+  `assert` for internal invariants. The error messages include the
+  offending argument values (e.g. `k (8) must be <= ds.n - 1 (7)`)
+  because a `terminate()` from `assert` would tell the caller
+  nothing.
+- **No `std::span`-only overload.** `Dataset` is the canonical input;
+  a future "build KNNG over an arbitrary `(span<const float>, n, d)`
+  triple" could be added if a use case arises (e.g. a memory-mapped
+  buffer that is not a `Dataset`). Not adding it speculatively keeps
+  the API surface minimal for now.
+
+### Learning
+- The error-message string concatenation
+  `std::to_string(k) + " ... " + std::to_string(ds.n - 1)` triggered
+  zero `-Wconversion` warnings — `std::to_string(std::size_t)` is
+  `unsigned long`-typed and the default `+` overload composes
+  cleanly. A pleasant surprise; some other projects work around this
+  with custom `fmt`-style helpers.
+- The `extract_sorted` invariant from Step 09 (`size() == k` after
+  offering `>= k` distinct candidates) is what lets the post-loop
+  copy run unconditionally without a "did we get fewer than k?"
+  branch. This is one of those small payoffs of pinning the contract
+  on the lower-level component first.
+- `EXPECT_THROW` from GoogleTest is the right tool for the boundary
+  cases — `EXPECT_DEATH` would also work but introduces a
+  death-test-mode dependency that we have not opted into. The throw
+  shape lets us add a future test that inspects `e.what()` if
+  message stability ever matters.
+- The `BruteForceKnn.NegativeInnerProductMetricCompiles` test only
+  asserts shape, not numeric values — but its real purpose is to
+  prove that a *second* `Distance` functor instantiates cleanly
+  through the same template. Without it, the explicit instantiation
+  for `NegativeInnerProduct` would be dead code at link time, and a
+  future template-bug regression on the second metric would not be
+  caught by CI. Compile-time-coverage tests are still tests.
+
+### Next
+Step 11 lands dataset I/O — `src/io/fvecs.cpp` with loaders for
+the `.fvecs`, `.ivecs`, `.bvecs` formats used by the standard ANN
+benchmark datasets (SIFT, GIST, Fashion-MNIST). Memory-mapped reads
+keep large files (SIFT1M is 512 MiB) out of process address space
+proper. A `tools/download_sift.sh` script provisions SIFT-small
+(10K × 128) into the gitignored `datasets/` directory. The unit test
+generates a tiny in-memory `.fvecs` byte sequence and asserts the
+loader reads it back correctly — no network dependency in the test
+itself.
+
+---
+
 ## [Step 09] — Bounded top-k buffer `knng::TopK` (2026-05-01)
 
 ### What

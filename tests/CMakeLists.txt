@@ -72,3 +72,25 @@ gtest_discover_tests(test_top_k
         LABELS "top_k"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_brute_force` exercises the CPU brute-force KNN reference
+# builder. Links `knng::cpu` so the explicit-template-instantiation
+# symbols come from the static library rather than re-instantiating
+# in the test TU.
+add_executable(test_brute_force brute_force_test.cpp)
+target_link_libraries(test_brute_force
+    PRIVATE
+        knng::cpu
+        GTest::gtest_main
+)
+knng_set_warnings(test_brute_force)
+
+set_target_properties(test_brute_force PROPERTIES
+    OUTPUT_NAME "test_brute_force"
+)
+
+gtest_discover_tests(test_brute_force
+    PROPERTIES
+        LABELS "brute_force"
+    DISCOVERY_TIMEOUT 10
+)

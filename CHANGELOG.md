@@ -12,6 +12,171 @@ independent of the code diff.
 
 ---
 
+## [Step 13] — End-to-end CLI `build_knng` (2026-05-01)
+
+### What
+- Added `tools/build_knng.cpp` — a CLI executable that accepts
+  `--dataset PATH --k N [--metric M] [--algorithm A] [--output PATH]`,
+  loads the dataset via `knng::io::load_fvecs`, runs
+  `knng::cpu::brute_force_knn` under the chosen metric, and writes
+  the resulting `Knng` to disk in a documented binary format.
+- The output format is **version 1**, fixed-width 64-byte header
+  followed by `n*k` `uint32` neighbor IDs and `n*k` `float32`
+  distances. Header fields: 8-byte ASCII magic `KNNGRAPH`, 4-byte
+  format version, 4-byte index width, 4-byte distance width, 4-byte
+  metric id (`0=l2`, `1=inner_product`), 4-byte algorithm id
+  (`0=brute_force`), 8-byte `n`, 8-byte `k`, 20-byte zero-filled
+  reserved tail. All multi-byte integers are little-endian. The
+  full layout is documented at the top of `tools/build_knng.cpp`
+  and is the source of truth for the loader that lands in Phase 2.
+- Hand-rolled CLI parser (no third-party dependency): long-option-
+  only `--key value` syntax, `--help` / `-h` print usage and exit 0,
+  unknown flags / missing required flags / trailing garbage in a
+  numeric value print usage and exit 2, runtime errors during load /
+  build / write print a one-line message and exit 1. Three exit
+  codes, three meanings — easy to test with `$?`.
+- Promoted `tools/CMakeLists.txt` to declare the `build_knng`
+  target, linking `knng::cpu` and `knng::io`. The pre-existing
+  `hello_knng` is untouched.
+- Smoke-tested end-to-end: built a 6-record `.fvecs` fixture
+  (two clusters of unit-square corners, same shape as the Step 10
+  `BruteForceKnn.EightPointClusterHandVerifiedRows` test), ran
+  `build_knng --k 3`, inspected the binary output: header bytes
+  match the documented format and the row-0 neighbor IDs `(1, 2, 3)`
+  match the brute-force test's hand-verified expectations. Help,
+  missing-file, and missing-required-flag paths each behave as
+  documented.
+- README updated with a new **End-to-end CLI** subsection showing
+  the SIFT-small invocation; the existing testing paragraph
+  re-listed all current test binaries.
+- ctest still 40/40 green.
+
+### Why
+This is the first commit in the project where a downstream user can
+do something useful without writing a line of C++. The bench
+binary from Step 12 also runs end-to-end, but its consumer is a
+benchmark harness — `build_knng` is the consumer-facing surface
+that proves the entire Phase 1 pipeline (load → build → save) works
+together.
+
+The binary output format is documented *now*, with version 1, even
+though no loader exists yet. Two reasons:
+
+1. **Lock the wire shape before consumers depend on it.** The
+   recall harness in Phase 2 will be the first reader; the Python
+   bindings in Phase 13 will be the second; an external converter
+   (e.g. into `ann-benchmarks`'s own format) will be the third.
+   Every one of those readers needs a stable spec — pinning the
+   header layout here, with a `format_version` field that lets
+   future versions branch cleanly, costs nothing now and prevents
+   "what does that file actually look like?" archaeology later.
+2. **The header self-describes the runtime types.** Storing
+   `index_byte_width` and `distance_byte_width` in the header (not
+   just inferring them from `sizeof(knng::index_t)`) means a
+   future reader can detect a mismatch and either widen, refuse, or
+   convert. When the project eventually grows a 16-bit-ID quantised
+   path (mentioned in `types.hpp`), the existing `.knng` files
+   produced today will still be readable without a "version
+   2.0" rewrite.
+
+The hand-rolled CLI parser was a deliberate non-dependency choice.
+`CLI11` and `cxxopts` are both excellent, but Phase 1 has six flags;
+adding a header-only library plus a `FetchContent` block to handle
+six flags is the wrong tradeoff. Phase 13's `build_knng` rewrite
+(when the production polish step adds, e.g., GPU algorithm
+selection, multi-metric, multi-output-format) will be the right
+moment to pull `CLI11` in — and to do so for real reasons, not
+"because that's what tools usually do."
+
+### Tradeoff
+- **`build_knng` only knows brute-force.** The plan explicitly calls
+  for the CLI to land at Step 13 even though brute-force is the
+  only available algorithm. The dispatch layer (`build()` free
+  function in the source) is structured to make adding NN-Descent
+  in Phase 5 a single new branch, so the choice does not paint us
+  into a corner.
+- **Output is a custom binary format, not `.knn` or HDF5.** The two
+  obvious "real" formats considered: `.knn` (faiss) and HDF5
+  (`ann-benchmarks`). Faiss `.knn` is undocumented public API and
+  changes between versions; HDF5 would add a non-trivial dependency
+  and a 2× output size on the metadata side. A 64-byte header plus
+  flat float/uint32 arrays is the simplest thing that works and
+  reads byte-for-byte the same way `numpy.fromfile` does. Phase 13's
+  Python bindings will add a `to_hdf5()` shim if `ann-benchmarks`
+  integration needs it.
+- **No checksum on the output.** The binary format does not include
+  a CRC over the payload. A 4-byte CRC32 in the reserved tail
+  would be cheap and would catch silent corruption during
+  long-running multi-day distributed builds. Deferred — not
+  rejected — until either a corruption incident motivates it or
+  the format ships to a third party.
+- **All status output goes to `stderr`.** This is deliberately POSIX-
+  conventional: `stdout` is reserved for whatever the tool's
+  "answer" is (currently nothing — the answer is the file written),
+  and progress / diagnostics go to `stderr` so a future use that
+  pipes `build_knng` output to another tool will not have to filter
+  out informational chatter. Worth pinning here so future tools
+  follow the same convention.
+- **`metric inner_product` flag value, not `negative_inner_product`.**
+  The internal functor is `NegativeInnerProduct` (the negation is
+  what makes the ordering monotone in the project's convention).
+  Exposing the negation in the CLI vocabulary would confuse a user
+  who knows IP search; the negation is an implementation detail.
+  The wire format's `metric_id=1` documentation explicitly mentions
+  `negative_inner_product` so a binary-format reader has the
+  unambiguous identifier.
+- **No unit test for `build_knng` itself.** The plan called for a
+  manual run, and the CLI is thin glue over already-tested
+  components: `parse_args` is the only locally-defined logic, and
+  it consists of `std::stoull` plus map lookups. A subprocess-based
+  integration test would be valuable but introduces the only test
+  in the suite that depends on a built binary path — not worth the
+  CI complexity at Phase 1. Phase 2's recall harness will exercise
+  the binary as part of its own pipeline.
+
+### Learning
+- Clang's `-Wfor-loop-analysis` fires on a `for (int i = 1; i < argc;
+  ++i)` loop that also does `++i` inside the body (the classic
+  "consume-flag-and-value" pattern). Restructuring as
+  `int i = 1; while (i < argc) { ...; i += 2; }` is the cleanest
+  fix; the warning is a real one and would have produced a subtle
+  off-by-one if the body's `++i` had been forgotten. Worth
+  remembering whenever a parser loop wants to skip a variable
+  number of arguments.
+- `std::filesystem::path::operator+=` appends in place without
+  inserting a separator — exactly what we want for the
+  `<dataset>.knng` default output computation. `operator/=` would
+  have inserted a path separator. Easy to confuse; the test was
+  whether `tiny.fvecs` produced `tiny.fvecs.knng` (it did) or
+  `tiny.fvecs/.knng` (it would have, with `/=`).
+- Returning `std::optional<Args>` from `parse_args` to signal
+  "user asked for `--help`" is much cleaner than the alternative
+  of a magic exit-code-throwing exception. The caller pattern
+  (`if (!parsed) { print_usage(); return 0; }`) reads obviously and
+  the function's signature documents the two outcomes.
+- Inspecting the output with `xxd` is a load-bearing debugging
+  technique for any hand-rolled binary format. The 4-byte
+  little-endian integers show up as e.g. `0600 0000` (= 6) which
+  is unambiguous on every platform that runs CI. Worth mentioning
+  in a future style note: when shipping a binary format, the first
+  test should be "does `xxd | head` look right?" before any
+  programmatic loader exists.
+
+### Next
+**Phase 1 is closed.** The naive CPU brute-force pipeline is now
+end-to-end: a `.fvecs` file goes in, a documented binary `.knng`
+file comes out, with a deterministic, hand-verified algorithm and
+40/40 unit tests pinning the contract. Phase 2 (Correctness
+Infrastructure) opens at Step 14 with the recall@k computation
+and a ground-truth caching layer that turns the binary `.knng`
+output into a recall measurement. The benchmark harness from
+Step 12 grows two new counters (`recall_at_k`,
+`n_distance_computations`); the Pareto plotting helper lands at
+Step 15; the deterministic XorShift RNG that Step 16 introduces is
+the precondition for every randomised builder in Phases 5 and 9.
+
+---
+
 ## [Step 12] — Benchmark harness skeleton (2026-05-01)
 
 ### What

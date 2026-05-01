@@ -66,9 +66,25 @@ cmake --build build --target docs    # optional, requires Doxygen
 
 `hello_knng` prints the library version and the compile-time build
 configuration; use it as a smoke test after changing the build system.
-`ctest` runs the GoogleTest suite (currently just `tests/smoke_test.cpp`,
-which verifies that the generated `knng/version.hpp` is reachable from a
-test target and internally consistent).
+`ctest` runs the GoogleTest suite covering the public API
+(`tests/core_test.cpp`), the bounded top-k buffer (`tests/top_k_test.cpp`),
+the CPU brute-force builder (`tests/brute_force_test.cpp`), and the
+`.fvecs` / `.ivecs` / `.bvecs` loaders (`tests/fvecs_test.cpp`).
+
+### End-to-end CLI
+
+`build_knng` is the user-facing tool: load a `.fvecs` dataset, run
+brute-force CPU KNN, write the resulting graph to a binary file
+documented at the top of `tools/build_knng.cpp`.
+
+```sh
+./tools/download_sift.sh          # one-time SIFT-small fetch
+./build/bin/build_knng \
+    --dataset datasets/siftsmall/siftsmall_base.fvecs \
+    --k 10 \
+    --metric l2 \
+    --output siftsmall_k10.knng
+```
 
 ### Configure-time options
 

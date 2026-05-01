@@ -12,3 +12,18 @@ knng_set_warnings(hello_knng)
 set_target_properties(hello_knng PROPERTIES
     OUTPUT_NAME "hello_knng"
 )
+
+# `build_knng` — end-to-end CLI builder. Loads a .fvecs dataset,
+# runs the CPU brute-force algorithm, writes a binary .knng graph.
+# See tools/build_knng.cpp for the output format documentation.
+add_executable(build_knng build_knng.cpp)
+target_link_libraries(build_knng
+    PRIVATE
+        knng::cpu
+        knng::io
+)
+knng_set_warnings(build_knng)
+
+set_target_properties(build_knng PROPERTIES
+    OUTPUT_NAME "build_knng"
+)

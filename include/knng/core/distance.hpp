@@ -27,6 +27,41 @@
 
 namespace knng {
 
+/// Scalar squared-L2 distance over two equal-length float buffers.
+///
+/// This is the lower-level C-style cousin of `L2Squared`: it takes raw
+/// pointers and an explicit length so that later SIMD intrinsics
+/// (Phase 4) and CUDA / HIP kernels (Phase 7+) can specialise the
+/// `(const float*, const float*, std::size_t)` signature without
+/// reaching through a `std::span` wrapper that those toolchains often
+/// inline poorly across ABI boundaries. The functor `L2Squared` below
+/// dispatches to this function for its single source of truth.
+///
+/// Contract:
+///   * `a` and `b` point to at least `dim` valid floats. No bounds
+///     checking — this is an inner-loop primitive.
+///   * `dim == 0` returns `0.0f` (the empty sum). No division, no
+///     special cases.
+///   * Result is the sum of squared componentwise differences; it is
+///     never negative and is finite whenever the inputs are finite.
+///
+/// @param a first feature vector, length `dim`
+/// @param b second feature vector, length `dim`
+/// @param dim number of float components in each vector
+/// @return Σ (a[i] - b[i])² over i ∈ [0, dim)
+[[nodiscard]] inline float squared_l2(const float* a,
+                                      const float* b,
+                                      std::size_t dim) noexcept
+{
+    float acc = 0.0f;
+    for (std::size_t i = 0; i < dim; ++i) {
+        const float delta = a[i] - b[i];
+        acc += delta * delta;
+    }
+    return acc;
+}
+
+
 /// Concept: a callable that scores the dissimilarity of two equal-length
 /// float vectors. See file-level documentation for the full contract.
 template <class F>
@@ -52,13 +87,10 @@ struct L2Squared {
     float operator()(std::span<const float> a,
                      std::span<const float> b) const noexcept
     {
-        float acc = 0.0f;
-        const std::size_t n = a.size();
-        for (std::size_t i = 0; i < n; ++i) {
-            const float delta = a[i] - b[i];
-            acc += delta * delta;
-        }
-        return acc;
+        // Single source of truth for the scalar formula — see
+        // `squared_l2` above. Per the concept contract, callers
+        // guarantee `a.size() == b.size()`.
+        return squared_l2(a.data(), b.data(), a.size());
     }
 };
 static_assert(Distance<L2Squared>);

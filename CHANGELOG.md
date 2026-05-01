@@ -12,6 +12,106 @@ independent of the code diff.
 
 ---
 
+## [Step 08] — Scalar `squared_l2` C-style primitive (2026-05-01)
+
+### What
+- Added `knng::squared_l2(const float* a, const float* b,
+  std::size_t dim)` to `include/knng/core/distance.hpp` — a free
+  function with the raw-pointer signature that later SIMD intrinsics
+  and CUDA / HIP kernels will specialise.
+- Refactored the existing `L2Squared::operator()` functor to delegate
+  to `squared_l2` so the scalar formula has a single source of truth.
+  No behaviour change; existing tests unchanged.
+- Added five GoogleTest cases under the `SquaredL2Free` suite:
+  * `ZeroForIdenticalPointers` — sanity check (Σ 0² = 0).
+  * `HandVerifiedThreeFourPair` — the canonical 3-4-5 right triangle:
+    `(3,4,0)` vs origin → 25.
+  * `DimZeroIsEmptySum` — empty sum is 0, no element read.
+  * `DimOneIsScalarSquaredDifference` — degenerate 1-D case.
+  * `AgreesWithFunctor` — cross-checks that the functor and the free
+    function produce identical output, pinning the delegation invariant.
+- `ctest` is now 18/18 green (was 13/13).
+
+### Why
+The Phase 1 plan calls for a "scalar L2 distance function" with a
+C-style signature. There were two ways to introduce it:
+
+1. *Replace* `L2Squared` with a free function and let callers wrap it
+   themselves. Rejected — every algorithm in the library is
+   parameterised on a `Distance` *concept*, not on free functions, and
+   removing the functor would force every algorithmic site to
+   instantiate a wrapper at the call. The concept-based dispatch is a
+   project invariant and not negotiable.
+2. *Add* a free function alongside `L2Squared`, and have the functor
+   delegate to it. **Chosen.** The free function is the lower-level
+   building block; the functor is the high-level concept-satisfying
+   adapter. SIMD (Step 27) and CUDA (Step 46) will provide alternative
+   `squared_l2` overloads keyed on a tag type or a backend macro
+   without touching the functor or any algorithm that uses it.
+
+The "single source of truth" property matters precisely because it
+prevents the kind of accidental divergence where a hand-rolled SIMD
+implementation drifts from the scalar reference and only a recall
+regression on SIFT1M reveals the bug a month later. Pinning the scalar
+formula in one place — and giving every other implementation a
+property-based test that compares against it on random inputs (a
+pattern Phase 4 will introduce) — is cheap insurance.
+
+### Tradeoff
+- **Inline in the header, not in a `.cpp`.** `squared_l2` is small
+  enough that a translation-unit-local copy in every consumer is
+  cheaper than the function-call overhead a non-inlined version would
+  incur in a hot inner loop. The header-only choice also keeps
+  `knng_core` an INTERFACE library for one more step (it gains real
+  source files at Step 10). Cost: a tiny amount of object-code
+  duplication across translation units; the linker dedupes via
+  `inline` semantics.
+- **No `restrict`-equivalent on the pointers.** C++ has no
+  `__restrict__` in the standard, and adding `__restrict__` /
+  `__attribute__((restrict))` here would either be compiler-specific
+  or require a project-wide `KNNG_RESTRICT` macro. Deferred to Phase 4
+  alongside the other SIMD-prerequisite ergonomics.
+- **No bounds checking, no nullptr check.** This is an explicit "inner
+  loop primitive" — the documentation says so, the contract says so.
+  Every guard added here is a guard executed once per distance
+  computation. Validation lives at the boundary (the `Dataset`
+  constructor, future I/O loaders, the eventual `build_knng` CLI), not
+  in the scalar kernel.
+- **Functor still defined in the header.** Could have been moved to a
+  `distance.cpp`, but `L2Squared` is empty (no state, just an
+  `operator()`) and inlining the call site is the whole point. Keeps
+  the rule "POD types live in headers" consistent.
+
+### Learning
+- The `[[nodiscard]]` attribute on the free function caught one
+  oversight in an earlier draft of the test file where the return
+  value of `squared_l2` was computed but never asserted on — the
+  warning fired immediately under `-Werror`. Cheap signal that the
+  attribute is paying for itself even at toy scale.
+- The `dim == 0` branch needed a deliberate test, not because it is
+  algorithmically interesting but because the for-loop's
+  `i < 0` initial condition is `false` and the function correctly
+  returns the initialised `acc = 0.0f`. Documenting this as a test
+  case makes it impossible for a future "let's optimise the inner
+  loop" rewrite to silently break the empty-sum invariant.
+- Naming the free function `squared_l2` (lower-snake) and the functor
+  `L2Squared` (PascalCase) follows the project naming table exactly:
+  free function ⇒ snake_case, composite type ⇒ PascalCase. The two
+  spellings sitting side-by-side in the header is itself a small
+  documentation of the convention.
+
+### Next
+Step 09 introduces `include/knng/top_k.hpp` — a `class TopK` that
+accepts `(index_t, float)` pairs via `push()` and emits a sorted
+vector of size ≤ k via `extract_sorted()`. Internally backed by
+`std::priority_queue` with a max-heap keyed on distance, so the
+worst-distance element is always at the top and a new candidate can
+be admitted in O(log k) time without scanning the buffer. Tests cover
+ordering, the size-k invariant under repeated insertion, duplicate
+distances, and the empty-output edge case.
+
+---
+
 ## [Step 07] — Core-types residue: `knng::Dataset` (2026-05-01)
 
 ### What

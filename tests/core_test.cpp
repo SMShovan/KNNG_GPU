@@ -29,6 +29,50 @@
 
 namespace {
 
+TEST(SquaredL2Free, ZeroForIdenticalPointers)
+{
+    constexpr std::array<float, 4> a{1.0f, 2.0f, 3.0f, 4.0f};
+    EXPECT_FLOAT_EQ(knng::squared_l2(a.data(), a.data(), a.size()), 0.0f);
+}
+
+TEST(SquaredL2Free, HandVerifiedThreeFourPair)
+{
+    // (3-0)² + (4-0)² + (0-0)² == 9 + 16 == 25
+    constexpr std::array<float, 3> a{0.0f, 0.0f, 0.0f};
+    constexpr std::array<float, 3> b{3.0f, 4.0f, 0.0f};
+    EXPECT_FLOAT_EQ(knng::squared_l2(a.data(), b.data(), 3), 25.0f);
+}
+
+TEST(SquaredL2Free, DimZeroIsEmptySum)
+{
+    // The pointers must remain valid even though no element is read.
+    // A nullptr pair would also be defensible, but the contract is
+    // "points to at least dim floats", so we exercise the dim == 0
+    // case with real (unread) storage.
+    constexpr std::array<float, 1> a{42.0f};
+    constexpr std::array<float, 1> b{-7.0f};
+    EXPECT_FLOAT_EQ(knng::squared_l2(a.data(), b.data(), 0), 0.0f);
+}
+
+TEST(SquaredL2Free, DimOneIsScalarSquaredDifference)
+{
+    constexpr float a = 5.0f;
+    constexpr float b = 2.0f;
+    EXPECT_FLOAT_EQ(knng::squared_l2(&a, &b, 1), 9.0f);
+}
+
+TEST(SquaredL2Free, AgreesWithFunctor)
+{
+    // Cross-check: the functor delegates to this function, so the two
+    // must agree byte-for-byte on the same inputs.
+    constexpr std::array<float, 5> a{ 1.0f,  2.0f,  3.0f,  4.0f,  5.0f};
+    constexpr std::array<float, 5> b{-1.0f, -2.0f, -3.0f, -4.0f, -5.0f};
+    const knng::L2Squared functor;
+    EXPECT_FLOAT_EQ(
+        knng::squared_l2(a.data(), b.data(), a.size()),
+        functor(std::span<const float>{a}, std::span<const float>{b}));
+}
+
 TEST(L2Squared, ZeroForIdenticalVectors)
 {
     constexpr std::array<float, 4> a{1.0f, 2.0f, 3.0f, 4.0f};

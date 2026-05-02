@@ -17,6 +17,7 @@ add_library(knng::core ALIAS knng_core)
 
 add_library(knng_cpu STATIC
     cpu/brute_force.cpp
+    cpu/distance.cpp
 )
 target_link_libraries(knng_cpu PUBLIC knng::core)
 knng_set_warnings(knng_cpu)

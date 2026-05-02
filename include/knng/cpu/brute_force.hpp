@@ -31,6 +31,37 @@
 
 namespace knng::cpu {
 
+/// L2 brute-force builder using the precomputed-norms identity.
+///
+/// Mathematically identical to `brute_force_knn(ds, k, L2Squared{})`:
+///
+///     ||a - b||²  =  ||a||²  +  ||b||²  -  2 · ⟨a, b⟩
+///
+/// The right-hand side replaces each pair's `O(d)` subtract-and-
+/// square-and-sum with a `O(d)` multiply-and-accumulate plus three
+/// scalar adds. Under fp32 it is ~1.5× the work per pair on paper
+/// (`d` muls + `d` adds vs `d` subs + `d` muls + `d` adds), but the
+/// muls fuse with the loads on every modern CPU and the
+/// post-`compute_norms_squared` phase pays the per-row cost exactly
+/// once, so the inner loop is dominated by the dot product alone.
+/// Step 21 swaps the dot product for `cblas_sgemm`; this step is
+/// the algebraic predecessor that makes that swap a one-line change.
+///
+/// Output is bit-identical to the canonical `brute_force_knn` path
+/// in fp32 *only* up to the floating-point reordering of the
+/// accumulation; the test suite asserts row-equality of neighbor
+/// IDs and `EXPECT_NEAR` of distances within a small relative
+/// tolerance.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point. Same constraints as
+///          `brute_force_knn`: `1 <= k <= ds.n - 1`.
+/// @return A `Knng` of shape `(ds.n, k)`; rows sorted ascending by
+///         distance with ties broken by ascending neighbor index.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_with_norms(const Dataset& ds,
+                                                 std::size_t k);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

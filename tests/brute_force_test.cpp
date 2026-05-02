@@ -186,4 +186,79 @@ TEST(BruteForceKnn, EmptyDatasetThrowsInvalidArgument)
         std::invalid_argument);
 }
 
+// ---------------------------------------------------------------------
+// Step 19: brute_force_knn_l2_with_norms — must agree with
+// brute_force_knn(... L2Squared{}) up to fp accumulation reordering.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2Norms, MatchesCanonicalRowsExactlyOnEightPointFixture)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto norms_path =
+        knng::cpu::brute_force_knn_l2_with_norms(ds, std::size_t{3});
+
+    ASSERT_EQ(baseline.n, norms_path.n);
+    ASSERT_EQ(baseline.k, norms_path.k);
+
+    // Hand-crafted fixture has well-separated clusters; every row's
+    // top-3 neighbors are unique-by-distance, so neighbor IDs must
+    // match exactly between the two paths and distances must be
+    // numerically very close (the algebraic identity shifts the
+    // accumulation order but not the result up to fp reorder).
+    for (std::size_t q = 0; q < baseline.n; ++q) {
+        const auto base_n  = baseline.neighbors_of(q);
+        const auto norms_n = norms_path.neighbors_of(q);
+        for (std::size_t j = 0; j < baseline.k; ++j) {
+            EXPECT_EQ(base_n[j], norms_n[j]) << "row " << q << " col " << j;
+        }
+        const auto base_d  = baseline.distances_of(q);
+        const auto norms_d = norms_path.distances_of(q);
+        for (std::size_t j = 0; j < baseline.k; ++j) {
+            EXPECT_NEAR(base_d[j], norms_d[j], 1e-4f)
+                << "row " << q << " col " << j;
+        }
+    }
+}
+
+TEST(BruteForceKnnL2Norms, DistancesAreNonNegative)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto g = knng::cpu::brute_force_knn_l2_with_norms(
+        ds, std::size_t{5});
+    for (std::size_t q = 0; q < g.n; ++q) {
+        for (auto d : g.distances_of(q)) {
+            EXPECT_GE(d, 0.0f);
+        }
+    }
+}
+
+TEST(BruteForceKnnL2Norms, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_with_norms(
+            ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Norms, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_with_norms(
+            ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Norms, EmptyDatasetThrowsInvalidArgument)
+{
+    const knng::Dataset ds;
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_with_norms(
+            ds, std::size_t{1}); },
+        std::invalid_argument);
+}
+
 } // namespace

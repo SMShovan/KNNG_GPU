@@ -125,6 +125,36 @@ BENCHMARK(BM_BruteForceL2_Synthetic)
     ->ArgsProduct({{256, 512, 1024}, {32, 128}})
     ->Unit(benchmark::kMillisecond);
 
+/// Step-19 variant: same arithmetic, precomputed-norms identity.
+/// Recall must stay at 1.0 (it is a pure algebraic rewrite); wall
+/// time should drop relative to `BM_BruteForceL2_Synthetic` on
+/// long-`d` runs where the dot product dominates.
+void BM_BruteForceL2Norms_Synthetic(benchmark::State& state)
+{
+    const std::size_t n = static_cast<std::size_t>(state.range(0));
+    const std::size_t d = static_cast<std::size_t>(state.range(1));
+    constexpr std::size_t k = 10;
+    constexpr std::uint64_t seed = 42;
+
+    const knng::Dataset ds = make_synthetic(n, d, seed);
+
+    const knng::Knng truth = knng::cpu::brute_force_knn(
+        ds, k, knng::L2Squared{});
+    knng::Knng last;
+
+    for (auto _ : state) {
+        last = knng::cpu::brute_force_knn_l2_with_norms(ds, k);
+        benchmark::DoNotOptimize(last);
+        benchmark::ClobberMemory();
+    }
+
+    const double recall = knng::bench::recall_at_k(last, truth);
+    annotate(state, n, d, k, recall);
+}
+BENCHMARK(BM_BruteForceL2Norms_Synthetic)
+    ->ArgsProduct({{256, 512, 1024}, {32, 128}})
+    ->Unit(benchmark::kMillisecond);
+
 void BM_BruteForceL2_Fvecs(benchmark::State& state)
 {
     const char* path = std::getenv("KNNG_BENCH_FVECS");

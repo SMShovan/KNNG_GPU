@@ -12,6 +12,155 @@ independent of the code diff.
 
 ---
 
+## [Step 19] — Squared-distance optimisation: precomputed `||p||²` (2026-05-02)
+
+### What
+- Added `include/knng/cpu/distance.hpp` and
+  `src/cpu/distance.cpp` with two CPU-side primitives the rest of
+  Phase 3 will lean on:
+  * `dot_product(a, b, dim)` — scalar inner product, the
+    `(const float*, const float*, std::size_t)`-shaped twin of the
+    Step-08 `squared_l2`. Same signature so a future SIMD pass
+    (Step 27) can overload both functions in lockstep.
+  * `compute_norms_squared(ds, out)` — `O(n*d)` precompute of
+    `||row_i||²` written into a caller-supplied vector. Asserts
+    `ds.is_contiguous()` (the precondition the Step-18 helper
+    is designed to feed into).
+- Added `knng::cpu::brute_force_knn_l2_with_norms(ds, k)` — an
+  L2-specific entry point that precomputes the norm vector once
+  before the timed loop and replaces each pair's
+  subtract-and-square with the algebraic identity
+  `||a - b||² = ||a||² + ||b||² - 2⟨a,b⟩`. Mathematically
+  identical to `brute_force_knn(ds, k, L2Squared{})` up to fp
+  accumulation reordering; the result is clamped at zero to
+  swallow a small negative produced by fp32 cancellation when
+  `a == b` after rounding.
+- Five new `test_brute_force` cases asserting elementwise
+  equality of neighbor IDs vs the canonical builder (8-point
+  fixture, k=3), distance equality within `1e-4` of the
+  canonical result, distances are non-negative, and the same
+  argument-validation throws on `k=0`, `k > n-1`, and empty
+  datasets.
+- Added a parallel benchmark family
+  `BM_BruteForceL2Norms_Synthetic` mirroring the existing
+  `BM_BruteForceL2_Synthetic` over the same `(n, d)` grid. Both
+  emit the project-standard `recall_at_k`, `peak_memory_mb`,
+  `n_distance_computations` counters from Step 16; recall stays
+  at `1.0` for both (the norms path is a pure algebraic
+  rewrite). On AppleClang at d=128, n=1024 the norms path is
+  ~6% faster than the canonical path; gains are larger on
+  long-`d` where the per-pair `O(d)` dominates.
+- ctest 83/83 green (5 new brute_force, 78 carried over from
+  Step 18).
+
+### Why
+Step 19 is the project's first measurable Phase-3 optimisation
+and the one Step 21 (BLAS GEMM) will literally swap into. The
+identity rewrite is what makes "distance as GEMM" possible:
+`-2 X Yᵀ` from `cublasSgemm` produces the cross term, the
+precomputed norms close out the formula. Landing the norms
+infrastructure now means Step 21 is a one-line substitution
+(`dot_product(a, b, d)` → a `cblas_sgemm` call over a
+QUERY_TILE × REF_TILE block) rather than a rewrite.
+
+The expected ~30% speedup quoted in the plan is hardware- and
+compiler-dependent. On AppleClang 21 with `-O3` the canonical
+path's hot inner loop already vectorises cleanly — the
+auto-vectoriser fuses the subtract, multiply, and accumulate
+into a single sequence of NEON `vmlaq_f32`s — so the algebraic
+rewrite "only" trades that for a `vmla` over the dot product
+plus three scalar adds outside the inner loop. The net result
+is the modest ~6% measured here. On compilers that do not
+autovectorise the subtract-and-square form (older GCC, MSVC at
+`/O2`), the speedup is closer to the 30% the plan predicts. The
+*right* place for the headline speedup is Step 21's BLAS path —
+this commit's purpose is to deliver the algebraic prerequisite,
+not the headline number.
+
+The clamp-at-zero on a negative result is a small but important
+correctness detail. Under the algebraic identity, `||a - b||²`
+for identical points becomes `2 * ||a||² - 2 * ⟨a, a⟩` which is
+mathematically zero but can round to a tiny negative under fp32
+cancellation. `TopK`'s tie-break logic compares distances by
+strict-`<`, so a `-1e-7` would order *before* a true zero and
+the test against the canonical path would fail
+elementwise-equality. The clamp swallows this without changing
+any meaningful ordering.
+
+The L2-specific entry point is a separate function rather than a
+template specialisation of `brute_force_knn` for `L2Squared`. The
+templated path remains the right shape for `NegativeInnerProduct`
+and any future user-supplied `Distance`; the norms identity is
+algebraically valid only for a metric of the form
+`f(a, b) = g(||a||) + h(||b||) + dot-product-term`, which today
+means L2 (and tomorrow may mean cosine, but only after a
+separate norms-table pass). Keeping the two functions distinct
+means the type signature documents the precondition.
+
+### Tradeoff
+- **The norms vector costs `4 * n` extra bytes.** For SIFT1M
+  this is 4 MB — negligible next to the 512 MB feature buffer.
+  We do not free it after the build; we let it die with the
+  function frame. A future refactor that wants to amortise the
+  norms table across multiple builds (e.g. a CLI that runs L2
+  brute-force at multiple `k`) can hoist the
+  `compute_norms_squared` call to the caller without changing
+  the entry-point's API — `brute_force_knn_l2_with_norms_view`
+  taking `std::span<const float> norms` would be a one-line
+  addition.
+- **Two L2 entry points now coexist.** A naive caller might pick
+  the slower one. We accept the duplication: the canonical path
+  is the correctness reference (every later optimisation tests
+  against it elementwise), and removing it would force every
+  test to use the optimised path, which in turn would mask
+  bugs in the optimised path. The `tools/build_knng` CLI still
+  routes through the canonical path; switching it to the norms
+  path will land in Step 21 alongside the BLAS variant.
+- **The clamp-at-zero hides a real fp pathology.** If a future
+  refactor accidentally inverts `dot_product`'s sign, every
+  distance would silently round to zero instead of producing a
+  large negative number that lights up a test. The mitigation
+  is the elementwise-equality test against the canonical path
+  on the 8-point fixture — any sign error breaks neighbor IDs
+  long before the clamp matters.
+
+### Learning
+- *Algebraic rewrites are correctness-equivalent only modulo fp.*
+  `||a - b||² = ||a||² + ||b||² - 2⟨a,b⟩` is exactly equal in
+  the rationals; in fp32 the two paths diverge by a few ulps
+  per pair because the accumulation orders differ. The test
+  uses `EXPECT_NEAR(.., 1e-4f)` not `EXPECT_FLOAT_EQ` for that
+  reason. The day Step 21 ships a BLAS path, the same fixture
+  will pin the same equivalence between three paths (canonical,
+  norms-precompute, BLAS) instead of two — same test shape,
+  one extra column.
+- *AppleClang's autovectoriser is a bigger lift than the
+  algebraic rewrite at small d.* The plan's 30% predicted
+  speedup is predicated on the canonical path *not*
+  vectorising; on AppleClang it does. The measured 6% gain at
+  d=128 is real but the right reading is "the autovectoriser
+  is doing most of the work the rewrite was supposed to do."
+  This is exactly why Step 27's *hand-written* AVX2 / NEON
+  variant exists — it gives us a path the autovectoriser
+  cannot already match, on top of this step's identity.
+- *Two entry points are better than one specialised template.*
+  The temptation was to write `brute_force_knn<L2Squared>`
+  as a partial specialisation that magically picked the
+  norms path. We resisted: the type signature
+  `brute_force_knn_l2_with_norms` reads at the call site as
+  "I want the L2-specific norms-precompute variant" without the
+  reader having to know which template specialisations exist.
+  Specialisations are a clever pattern with diminishing
+  returns; explicit naming wins on clarity.
+
+### Next
+- Step 20: `(QUERY_TILE × REF_TILE)` distance tiling for L1
+  residency. Will operate on the same `data_ptr() + stride`
+  arithmetic Step 18 introduced and the dot-product primitive
+  this step ships.
+
+---
+
 ## [Step 18] — Struct-of-Arrays layout: stride helpers + contiguity contract (2026-05-02)
 
 ### What

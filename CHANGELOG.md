@@ -12,6 +12,137 @@ independent of the code diff.
 
 ---
 
+## [Step 23] — Phase-3 profiling writeup (2026-05-02)
+
+### What
+- Added `docs/PERF_STEP23.md` — the project's first profiling
+  artefact, summarising the Phase-3 optimisation ladder with the
+  numbers measured at `n=1024, d=128, k=10` on AppleClang 21
+  (Apple M-series). One row per builder, three repetitions per
+  row (mean reported), `recall_at_k` reported alongside wall time
+  so the speed-vs-quality story is in one table:
+
+  ```text
+  Step 10  canonical                   70.48 ms   1.00× recall=1.0
+  Step 19  + precomputed ||p||²        65.66 ms   1.07× recall=1.0
+  Step 20  + (32 × 128) tile           65.41 ms   1.08× recall=1.0
+  Step 22  + std::partial_sort         62.40 ms   1.13× recall=1.0
+  Step 21  + cblas_sgemm                3.82 ms  18.45× recall=1.0
+  ```
+
+- Documents the methodology end-to-end: the exact CMake +
+  `bench_brute_force` invocation that reproduces the table, the
+  three Google-Benchmark counters every row carries
+  (`recall_at_k`, `peak_memory_mb`, `n_distance_computations`),
+  and a short Python aggregator that flattens the JSON to the
+  table shown above.
+- Captures four open questions deferred to a later pass:
+  AppleClang-vs-GCC on the same hardware, BLAS-provider
+  comparison (Accelerate vs OpenBLAS vs MKL), `(query_tile,
+  ref_tile)` sweep at SIFT1M scale, and memory-residency check
+  for the partial-sort scratch buffer at large `n`. Each is
+  framed as "what this writeup does not claim" so a future
+  contributor can see the open work without re-reading the
+  surrounding context.
+- Pins the structure (`Optimisation ladder · Take-aways ·
+  Methodology · Open questions · Reproduction commands`) every
+  subsequent profile writeup will follow:
+  `docs/PERF_STEP50.md` for Phase 7's GPU foundations,
+  `docs/PERF_SINGLE_GPU.md` for the headline Phase 8 waterfall,
+  `docs/MULTI_GPU.md` for Phase 11. Same five sections, same
+  reproduction-first stance.
+- ctest still 100/100 green; this step adds no code.
+
+### Why
+The Phase-3 ladder needs a single artefact that collects its
+five numbers, preserves the methodology that produced them, and
+is reproducible six months from now when a contributor wonders
+"why does Step 21 claim 18×?" Without the writeup, the numbers
+in each step's individual CHANGELOG entry are scattered across
+five files; without the methodology, the numbers themselves are
+unfalsifiable. This is the artefact the project's pedagogy
+ultimately rests on — the README will eventually link to it from
+the front page, and the Phase 13 architecture document
+(`docs/ARCHITECTURE.md`) will reference it as one of the project's
+six headline profiles.
+
+The plan called this step "Profiling writeup" and explicitly
+"the first profiling step — pattern reused throughout the
+project." We honour that intent both ways: the file is created,
+and the file's *structure* is what the later writeups will
+inherit. Open questions are explicitly enumerated as deferred
+work — the alternative (sneaking them into a half-finished
+"future work" section that nobody reads) would let the questions
+silently rot.
+
+The cycle-counter (`instruments` / `perf stat`) study the plan
+mentions — cache-miss rates, IPC, branch prediction — is
+deliberately deferred to a later revisit. Reasoning: the wall-time
+artefact captured here is sufficient to defend Phase 3's claim
+("each step preserved recall and produced a measurable speedup").
+The cycle-counter numbers would be retired the moment Phase 4
+introduces OpenMP, which changes the cache-residency model.
+Capturing them now would tie us to a snapshot that will not
+survive the next phase. The deferred-questions section in the
+writeup is the bookmark.
+
+### Tradeoff
+- **The numbers are AppleClang on M-series only.** Until the
+  project has a Linux CI runner that emits cycle counters, the
+  Phase-3 picture has a single platform. We accept the
+  one-platform claim; the writeup is upfront about what it
+  does and does not show, and the four open questions all
+  have "rerun on Linux" as their natural resolution.
+- **The artefact ships as a `.md`, not as a CSV + plot script.**
+  A machine-readable companion would make the table
+  diff-friendly. We deferred: the JSON the bench harness
+  produces *is* the canonical machine-readable form; the
+  Markdown table is a human-readable summary derived from it.
+  Adding a third "summary CSV" format would be a fourth thing
+  to keep in sync.
+- **Recall is reported as `1.0` exactly.** It is, but on a
+  fixture (synthetic n=1024, d=128) where every recall is
+  trivially 1.0 because the algorithms are all exact L2
+  brute-force. The first non-trivial recall numbers ship in
+  Phase 5 (NN-Descent) and Phase 9 (GPU NN-Descent); the
+  Step-23 writeup is structured so adding a "recall vs speed"
+  plot in those phases is a single new figure, not a rewrite.
+
+### Learning
+- *Profile writeups are pedagogical artefacts, not data dumps.*
+  The temptation in writing one is to paste every JSON row.
+  The discipline is to compress to a five-row table that *tells
+  a story* — "the BLAS step dominates everything else" is the
+  story Phase 3 tells; readers should leave the page with that
+  one sentence in their heads, not with a 200-row CSV. Every
+  later writeup will follow this template: one table, five
+  paragraphs, four open questions.
+- *Open questions deserve a section title.* Burying "future
+  work" at the end of a paragraph is how it gets forgotten.
+  Pinning it as a section called "Open questions, deferred to
+  a later pass" with explicit bullets gives a future
+  contributor (or future me) a place to start when the
+  AppleClang-vs-GCC rerun finally happens.
+- *Reproduction commands are the writeup's contract with
+  posterity.* The exact `cmake` + `bench_brute_force` invocation
+  is what makes the writeup not-a-snapshot. A reader six months
+  from now should be able to run the commands and see numbers
+  in the same neighbourhood. If they cannot, either the
+  artefact is wrong or the project regressed — both of which
+  are useful to know.
+
+### Next
+- Phase 4 (Step 24): OpenMP `#pragma omp parallel for` on the
+  outer query loop. The first parallel CPU step. Will rerun
+  the Phase-3 ladder with `-DKNNG_NUM_THREADS=N` and append
+  the rows to this writeup (same table shape; "Step 24"
+  becomes the next row).
+- Step 25 onwards continues the Phase 4 sequence
+  (NUMA, std::thread alternative, hand-vectorised SIMD, scaling
+  writeup).
+
+---
+
 ## [Step 22] — `std::partial_sort` for top-k extraction (2026-05-02)
 
 ### What

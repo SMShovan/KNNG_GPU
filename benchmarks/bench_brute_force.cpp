@@ -33,7 +33,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <random>
 #include <string>
 
 #include <benchmark/benchmark.h>
@@ -46,22 +45,24 @@
 #include "knng/core/graph.hpp"
 #include "knng/cpu/brute_force.hpp"
 #include "knng/io/fvecs.hpp"
+#include "knng/random.hpp"
 
 namespace {
 
 /// Deterministic synthetic dataset: every coordinate drawn from
-/// `Uniform[-1, 1]` with a fixed seed so two benchmark runs measure
-/// the same arithmetic. The seed is intentionally hard-coded here —
-/// Step 17 will introduce the project-wide `XorShift64` wrapper and
-/// `--seed` CLI plumbing; until then, a literal `42` is the
-/// least-surprising choice.
+/// `Uniform[-1, 1]` via the project-wide `knng::random::XorShift64`
+/// PRNG. Same seed ⇒ bit-identical dataset across runs across
+/// platforms, which is the property every recall regression in
+/// Phase 3+ depends on.
 knng::Dataset make_synthetic(std::size_t n, std::size_t d, std::uint64_t seed)
 {
     knng::Dataset ds(n, d);
-    std::mt19937_64 rng(seed);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    knng::random::XorShift64 rng{seed};
     for (std::size_t i = 0; i < ds.data.size(); ++i) {
-        ds.data[i] = dist(rng);
+        // Map [0, 1) → [-1, 1) — same shape as the previous
+        // std::mt19937_64 path but bit-identical to the GPU port
+        // we will write in Phase 9.
+        ds.data[i] = rng.next_float01() * 2.0f - 1.0f;
     }
     return ds;
 }

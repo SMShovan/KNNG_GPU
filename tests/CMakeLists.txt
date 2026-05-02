@@ -157,3 +157,25 @@ gtest_discover_tests(test_recall
         LABELS "recall"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_random` exercises the `knng::random::XorShift64` PRNG
+# (Step 17): seed → sequence determinism, non-zero state invariant,
+# float-in-[0,1), bounded-integer helper, drop-in compatibility
+# with `std::uniform_int_distribution`.
+add_executable(test_random random_test.cpp)
+target_link_libraries(test_random
+    PRIVATE
+        knng::core
+        GTest::gtest_main
+)
+knng_set_warnings(test_random)
+
+set_target_properties(test_random PROPERTIES
+    OUTPUT_NAME "test_random"
+)
+
+gtest_discover_tests(test_random
+    PROPERTIES
+        LABELS "random"
+    DISCOVERY_TIMEOUT 10
+)

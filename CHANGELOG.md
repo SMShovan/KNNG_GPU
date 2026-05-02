@@ -12,6 +12,147 @@ independent of the code diff.
 
 ---
 
+## [Step 17] — Deterministic RNG (`knng::random::XorShift64`) (2026-05-02)
+
+### What
+- Added `include/knng/random.hpp` — the project-wide deterministic
+  PRNG. Single class, header-only:
+  * `XorShift64{seed}` — Marsaglia (2003) `(13, 7, 17)` shift triple.
+    Period `2^64 - 1`; rejects the all-zero seed at construction
+    (it is the algorithm's fixed point) with `std::invalid_argument`.
+  * `operator()()` — returns a 64-bit value, advances state.
+  * `state()` / `seed(new_seed)` — snapshot-and-restore for
+    reproducible parallel sub-seeding (Step 35's parallel
+    NN-Descent will need this).
+  * `next_float01()` — uniform `[0, 1)` from the high 24 bits.
+    Cheaper than `std::uniform_real_distribution<float>` and
+    bit-identical to the GPU port we will write in Phase 9
+    (the implementation is integer-only until the final cast).
+  * `next_below(bound)` — uniform integer in `[0, bound)` via
+    Lemire's 64×64 → 128-bit multiplicative trick. Slightly biased
+    (≤ `bound / 2^64`); fine for sampling, not for security.
+  * `result_type`, `min()`, `max()` — drop-in compatible with
+    `std::uniform_int_distribution` and the rest of `<random>`'s
+    `UniformRandomBitGenerator` named requirement.
+- Added `tests/random_test.cpp` (11 cases): same-seed determinism,
+  different-seed divergence, zero-seed rejection on construction
+  and on `seed()`, non-zero state invariant under 10k steps,
+  `next_float01` range and histogram coverage, `next_below(0|1)`
+  edge cases and bound-stays-in-range, drop-in compatibility with
+  `std::uniform_int_distribution`, snapshot-and-restore via
+  `state()` / `seed()`.
+- Routed `benchmarks/bench_brute_force.cpp`'s `make_synthetic` through
+  `XorShift64` instead of `std::mt19937_64` so the bench's synthetic
+  dataset is now bit-identical between CPU and the GPU port we will
+  write in Phase 9. Removed the `<random>` include from the bench TU.
+- ctest 72/72 green (11 new random, 61 carried over).
+
+### Why
+Every step from here on either *is* randomised (NN-Descent's random
+graph init in Phase 5, sampling in Phase 5, mixed-precision noise
+analysis in Phase 8) or *consumes* randomised data (every bench
+that builds a synthetic dataset). Without a single source of truth
+for "give me random bits," each one of those steps would invent
+its own RNG, the project would accumulate three or four
+incompatible PRNGs, and "same seed ⇒ same output" would degenerate
+into "same seed ⇒ same output *if you remember which RNG*."
+
+XorShift64 was chosen over `std::mt19937_64`, `std::pcg64`, `xoshiro`,
+or anything from the `<random>` header for one decisive reason: it
+fits in a single CUDA / HIP register and runs in three shifts and
+two XORs per step, which means we can write the *same* code, byte
+for byte, on CPU host and GPU device. Phase 9's GPU NN-Descent
+init kernel will literally re-implement this class as a `__device__`
+struct and assert at unit-test time that running both produces the
+same sequence. `std::mt19937_64` cannot run on GPU without a custom
+implementation, and a custom implementation is exactly the kind of
+silent divergence the project is trying to avoid.
+
+The all-zero seed rejection is non-negotiable. XorShift64 has a
+fixed point at zero — the shifts XOR back to zero, then forever —
+so an accidental `XorShift64{0}` would silently degenerate into a
+constant generator. Throwing at construction surfaces the bug at
+its earliest moment instead of letting it leak into a downstream
+test that just happens to "pass."
+
+`next_float01()` exists because the natural `static_cast<float>(rng()) / 2^64`
+loses information: the IEEE-754 float significand is 24 bits, and
+multiplying a 64-bit integer down to a `[0, 1)` float requires
+rounding *somewhere*. Doing it explicitly — masking to 24 bits,
+casting to `float`, multiplying by `2^-24` — produces a result
+that is identical on every platform with IEEE-754 floats. Doing
+the natural thing produces a result that depends on the compiler's
+choice of rounding mode for the `uint64_t → float` cast, which
+varies across CPU and GPU.
+
+The bench's `make_synthetic` was updated rather than left on
+`std::mt19937_64` because the CHANGELOG entry for Step 16 already
+called out "the literal `42` and `std::mt19937_64` will be replaced
+in Step 17." The cost is one method call and a small mapping
+arithmetic; the benefit is that one of the two existing places in
+the project that consumed randomness now uses the canonical RNG,
+so the convention is "every RNG consumer routes through
+`knng::random`" rather than "every *new* RNG consumer does."
+
+### Tradeoff
+- **XorShift64 fails some randomness suites** that
+  `std::mt19937_64` passes (BigCrush has known weaknesses on
+  XorShift's lowest bit). For graph initialisation and sampling
+  this does not matter; for any future step that demands
+  cryptographic-grade randomness, we ship a different class
+  rather than weaken this one.
+- **No thread-local RNG by default.** Every parallel algorithm
+  has to seed its workers itself (typically via `XorShift64{base
+  ^ thread_id}` or by snapshotting + jumping). The alternative —
+  a `thread_local XorShift64 default_rng` — would make
+  reproducibility depend on threading topology, which is exactly
+  the property we are trying to avoid.
+- **Lemire's `next_below` is biased.** Bound by `bound / 2^64`,
+  which is `< 5e-15` for `bound ≤ 2^16` (the regime sampling
+  needs). When an algorithm later wants exact uniformity, it can
+  layer rejection sampling on top of `operator()()`; we will not
+  bake the rejection loop into the default path.
+- **Construction throws.** The project's "no exceptions in inner
+  loops" policy still holds — `XorShift64` is constructed once
+  per algorithm invocation, not per step, so the `throw` lives
+  outside any timed region. The alternative (silently mapping
+  `seed=0` to `seed=1`) was rejected: silent fixups hide the
+  caller's bug.
+
+### Learning
+- *RNG portability is a build-time decision, not a code-time one.*
+  Choosing an RNG that compiles to identical bytes on CPU and
+  GPU is the kind of choice that costs nothing today and saves
+  weeks in Phase 9 when the alternative would be "implement a
+  CUDA-specific MT19937 variant and pray the bits match." This
+  is the pattern: pick the simplest primitive that works on every
+  target, then build everything on top of that one primitive.
+- *`UniformRandomBitGenerator` is a tiny, well-defined named
+  requirement.* Implementing it is `result_type` + `min()` +
+  `max()` + `operator()()`, all `constexpr`-friendly, and the
+  payoff is drop-in compatibility with `std::shuffle`,
+  `std::uniform_int_distribution`, `std::sample`, and every
+  third-party algorithm that takes a "URBG by reference." The
+  test `ConformsToUniformRandomBitGenerator` is the proof of
+  this — if it compiles, the contract is satisfied.
+- *Reproducibility is a property of the entire stack, not just the
+  RNG.* `XorShift64` gives bit-identical *bits*, but the floats
+  produced by `next_float01` only stay bit-identical because the
+  cast and the multiply are deterministic. A separate
+  `std::uniform_real_distribution<float>` layered on top of
+  `XorShift64` would break this — it does internal scaling that
+  varies between libstdc++ and libc++. Owning the float
+  conversion ourselves prevents that whole class of bug.
+
+### Next
+- Step 18 (Phase 3 opens): Struct-of-Arrays / contiguity formalisation
+  on `Dataset`. The first CPU optimisation step. Performance
+  measurements from here on lean on the bench JSON shape that
+  Step 16 established and the deterministic synthetic dataset
+  this step delivers.
+
+---
+
 ## [Step 16] — JSON benchmark output (2026-05-02)
 
 ### What

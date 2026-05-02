@@ -261,4 +261,83 @@ TEST(BruteForceKnnL2Norms, EmptyDatasetThrowsInvalidArgument)
         std::invalid_argument);
 }
 
+// ---------------------------------------------------------------------
+// Step 20: brute_force_knn_l2_tiled — must agree with the canonical
+// L2 path for any tile-size choice that is at least 1×1.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2Tiled, MatchesCanonicalAtDefaultTileSizes)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto tiled = knng::cpu::brute_force_knn_l2_tiled(
+        ds, std::size_t{3});  // defaults: 32 × 128
+
+    ASSERT_EQ(baseline.n, tiled.n);
+    ASSERT_EQ(baseline.k, tiled.k);
+    EXPECT_EQ(baseline.neighbors, tiled.neighbors);
+    for (std::size_t i = 0; i < baseline.distances.size(); ++i) {
+        EXPECT_NEAR(baseline.distances[i], tiled.distances[i], 1e-4f);
+    }
+}
+
+TEST(BruteForceKnnL2Tiled, MatchesCanonicalWhenTilesSmallerThanN)
+{
+    // Tile sizes that force multiple iterations of both outer and
+    // inner tile loops on the 8-point fixture (n=8): 3 × 5 splits
+    // queries into [0..3, 3..6, 6..8] and references into [0..5, 5..8].
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto tiled = knng::cpu::brute_force_knn_l2_tiled(
+        ds, std::size_t{3}, std::size_t{3}, std::size_t{5});
+
+    ASSERT_EQ(baseline.n, tiled.n);
+    ASSERT_EQ(baseline.k, tiled.k);
+    EXPECT_EQ(baseline.neighbors, tiled.neighbors);
+}
+
+TEST(BruteForceKnnL2Tiled, MatchesCanonicalWhenTilesAreOne)
+{
+    // Degenerate 1 × 1 tiling — exercises the boundary handling
+    // at every (q_lo, r_lo) increment. Output must still match.
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{2}, knng::L2Squared{});
+    const auto tiled = knng::cpu::brute_force_knn_l2_tiled(
+        ds, std::size_t{2}, std::size_t{1}, std::size_t{1});
+
+    EXPECT_EQ(baseline.neighbors, tiled.neighbors);
+}
+
+TEST(BruteForceKnnL2Tiled, ZeroTileSizeThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_tiled(
+            ds, std::size_t{3}, std::size_t{0}, std::size_t{8}); },
+        std::invalid_argument);
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_tiled(
+            ds, std::size_t{3}, std::size_t{8}, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Tiled, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_tiled(ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Tiled, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_tiled(ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
 } // namespace

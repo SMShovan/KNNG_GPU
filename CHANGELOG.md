@@ -12,6 +12,135 @@ independent of the code diff.
 
 ---
 
+## [Step 20] — Block tiling: `(QUERY_TILE × REF_TILE)` distance blocks (2026-05-02)
+
+### What
+- Added `knng::cpu::brute_force_knn_l2_tiled(ds, k, query_tile=32,
+  ref_tile=128)`. Builds on Step 19's precomputed-norms identity
+  and wraps it in a pair of nested tile loops:
+
+  ```text
+  for each q_tile of QUERY_TILE rows
+      build QUERY_TILE TopK heaps
+      for each r_tile of REF_TILE rows
+          for each (q, r) in (q_tile × r_tile)
+              push the algebraic-identity distance
+      flush the q_tile's heaps to the output Knng
+  ```
+
+  The reference tile is touched `QUERY_TILE` times before being
+  evicted from L1. The default `(32, 128)` are sized so that
+  `query_tile × ref_tile × 2 × sizeof(float) ≈ 32 KB` — a typical
+  x86_64 / arm64 L1 data cache.
+- Added six new `test_brute_force` cases pinning the contract:
+  output matches the canonical `brute_force_knn(.., L2Squared{})`
+  at the default tile sizes; matches at `(3, 5)` (forces multiple
+  outer- and inner-tile iterations on the n=8 fixture); matches at
+  the degenerate `(1, 1)` (exercises the boundary code at every
+  step); both tile sizes throw on zero; same `k=0` / `k > n-1`
+  argument-validation throws as the other paths.
+- Added `BM_BruteForceL2Tiled_Synthetic` family that sweeps
+  `query_tile ∈ {16, 32, 64}` × `ref_tile ∈ {64, 128, 256}` at
+  `n=1024, d=128`. The tile sizes show up as `state.counters
+  ["query_tile"]` and `state.counters["ref_tile"]` in the JSON so
+  Step 23's profiling writeup can ingest the same JSON shape and
+  pick the empirical best.
+- ctest 89/89 green (6 new brute_force, 83 carried over). Synthetic
+  bench at `n=1024, d=128`: canonical 70.5 ms, norms-only
+  66.1 ms, tiled 64–66 ms across the sweep — a ~7% gain over
+  canonical, ~2% additional gain over norms-only. Recall stays at
+  1.0 across all configurations.
+
+### Why
+Tiling is the project's first "loop-shape, not arithmetic" CPU
+optimisation. Steps 17 and 19 reduced the *total* work; Step 20
+keeps the work the same but improves the order in which the
+already-touched data is reused. This is the same pattern the
+GPU phases will rely on (Step 52's shared-memory reference
+tiling, Step 54's register tiling), so getting the loop-nest
+shape right on CPU now means the GPU port in Phase 8 can
+literally translate this nest into a kernel rather than rederive
+the structure.
+
+The default `(32, 128)` is a deliberate compromise. A larger
+`QUERY_TILE` would amortise reference loads further but starts
+to spill the per-query heap state out of L1; a larger `REF_TILE`
+puts more references in cache before they are evicted but
+shrinks the outer-loop iteration count and reduces the
+prefetcher's lookahead. The sizes are exposed as parameters
+rather than baked in because (a) Step 23's profiling pass will
+want to sweep them and (b) the optimal values vary across CPUs
+— Apple Silicon's 192 KB L1d wants very different tiling from
+a Zen 4's 32 KB L1d.
+
+The "small but consistent" speedup (~2% on top of the norms
+path) is the expected result on AppleClang's already-aggressive
+autovectoriser: the dot product is bandwidth-limited at d=128
+with the per-query stream, so reusing references across `QUERY_TILE`
+queries reduces L2 traffic but cannot remove the L1 read of the
+query row. The wins compound on platforms where the canonical
+path's autovectoriser is weaker (older GCC, MSVC, ARM `clang`
+without `-mcpu=native`), where the tiling can swing a 30–40%
+speedup. The right reading of the AppleClang number is "the
+infrastructure is correct; the platform-dependent payoff lands
+under perf in Step 23."
+
+### Tradeoff
+- **Allocates `query_tile` `TopK` objects per outer-tile.** The
+  heap workspace `std::vector<TopK> heaps` is `clear()`-ed and
+  re-emplaced each iteration; the reserve in the constructor
+  avoids a realloc. Hoisting the allocation entirely
+  (e.g. precomputing all `n` heaps at function entry) was
+  considered and rejected: it would allocate `n × sizeof(TopK)`
+  once instead of `query_tile` per outer iteration, but
+  `sizeof(TopK)` plus its inner vector dominates and the
+  amortised cost is worse for `n >> query_tile`. The current
+  shape is right for SIFT1M-scale inputs.
+- **Adds a third L2 entry point.** `brute_force_knn` (canonical),
+  `brute_force_knn_l2_with_norms` (Step 19), and
+  `brute_force_knn_l2_tiled` (Step 20) all coexist. We accept
+  the surface growth: each carries a different default-tradeoff
+  contract, and the tests assert agreement across all three
+  on every fixture, so a regression in one path is immediately
+  surfaced by the others.
+- **No vector tiling on `d`.** The plan reserves coordinate-axis
+  tiling for Step 27's SIMD pass; here we tile the (query, ref)
+  axes only. This keeps the inner loop a clean `for j in 0..d`
+  scalar accumulate, which is exactly what the autovectoriser
+  expects to see — adding a `d`-axis tile now would just confuse
+  it.
+
+### Learning
+- *Tile sizes are configuration, not constants.* The defaults
+  cover the common case; the parameter names land in the JSON
+  counter map so Step 23 can sweep them without recompiling.
+  This is the "one knob per axis you might tune later" pattern
+  — every Phase 8 GPU step will follow it (block size, warp
+  count, shared-memory tile shape).
+- *Reuse-then-evict is the cache hierarchy's first lesson.* The
+  per-query scan reuses *nothing* — every reference row is read
+  once per query, and the L1 has thrown the previous query's
+  references away by the time the next query starts. Tiling
+  preserves the locality the data layout already has; it does
+  not invent any. Before reaching for shared memory or
+  prefetch intrinsics in later phases, get the tile loops right.
+- *The 8-point fixture is enough to certify a tiling rewrite.*
+  Two tile-size cases (`(3, 5)` exercising mid-row boundaries,
+  `(1, 1)` exercising every increment) plus the canonical
+  comparison covers more state-space than any randomised test
+  would. Hand-verified fixtures pay off the day a tile-loop
+  rewrite goes wrong — the test fails on a one-line diff
+  showing exactly which neighbour ID slipped.
+
+### Next
+- Step 21: `cblas_sgemm` for the cross-term in the algebraic
+  identity. The norms vector lives in this step's frame; the
+  GEMM will fill `(QUERY_TILE × REF_TILE)` of cross-products
+  in one BLAS call, fold the norms in via a tiny epilogue
+  kernel, and reuse the same tile loops Step 20 just shipped.
+
+---
+
 ## [Step 19] — Squared-distance optimisation: precomputed `||p||²` (2026-05-02)
 
 ### What

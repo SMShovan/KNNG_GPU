@@ -155,6 +155,41 @@ BENCHMARK(BM_BruteForceL2Norms_Synthetic)
     ->ArgsProduct({{256, 512, 1024}, {32, 128}})
     ->Unit(benchmark::kMillisecond);
 
+/// Step-20 tiled variant. The (n, d) grid mirrors the previous
+/// families so the JSON output can be diffed line-for-line; the
+/// extra (query_tile, ref_tile) inputs are encoded in `state.range`
+/// positions 2 and 3 so a sweep across tile sizes is a single
+/// `ArgsProduct` argument.
+void BM_BruteForceL2Tiled_Synthetic(benchmark::State& state)
+{
+    const std::size_t n  = static_cast<std::size_t>(state.range(0));
+    const std::size_t d  = static_cast<std::size_t>(state.range(1));
+    const std::size_t qt = static_cast<std::size_t>(state.range(2));
+    const std::size_t rt = static_cast<std::size_t>(state.range(3));
+    constexpr std::size_t k = 10;
+    constexpr std::uint64_t seed = 42;
+
+    const knng::Dataset ds = make_synthetic(n, d, seed);
+
+    const knng::Knng truth = knng::cpu::brute_force_knn(
+        ds, k, knng::L2Squared{});
+    knng::Knng last;
+
+    for (auto _ : state) {
+        last = knng::cpu::brute_force_knn_l2_tiled(ds, k, qt, rt);
+        benchmark::DoNotOptimize(last);
+        benchmark::ClobberMemory();
+    }
+
+    const double recall = knng::bench::recall_at_k(last, truth);
+    annotate(state, n, d, k, recall);
+    state.counters["query_tile"] = static_cast<double>(qt);
+    state.counters["ref_tile"]   = static_cast<double>(rt);
+}
+BENCHMARK(BM_BruteForceL2Tiled_Synthetic)
+    ->ArgsProduct({{1024}, {128}, {16, 32, 64}, {64, 128, 256}})
+    ->Unit(benchmark::kMillisecond);
+
 void BM_BruteForceL2_Fvecs(benchmark::State& state)
 {
     const char* path = std::getenv("KNNG_BENCH_FVECS");

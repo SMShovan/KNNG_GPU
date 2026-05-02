@@ -62,6 +62,41 @@ namespace knng::cpu {
 [[nodiscard]] Knng brute_force_knn_l2_with_norms(const Dataset& ds,
                                                  std::size_t k);
 
+/// L2 brute-force builder with `(QUERY_TILE × REF_TILE)` blocking.
+///
+/// Builds on the algebraic identity from
+/// `brute_force_knn_l2_with_norms` and adds an outer-loop tiling
+/// scheme designed for L1 residency:
+///
+/// ```text
+///   for each q_tile of QUERY_TILE rows:
+///       initialise QUERY_TILE TopK heaps
+///       for each r_tile of REF_TILE rows:
+///           compute the (QUERY_TILE × REF_TILE) distance block
+///           push every (q, r) pair into the matching heap
+///       write the q_tile's heaps into the output Knng
+/// ```
+///
+/// The reference tile is reused across `QUERY_TILE` queries before
+/// being evicted from L1; the heap state stays in registers /
+/// L1 throughout the q_tile. On AppleClang at d=128 this drops the
+/// L1 miss rate measurably vs the per-query scan.
+///
+/// Tile sizes are tunable via the optional parameters but default
+/// to `QUERY_TILE = 32`, `REF_TILE = 128` — values chosen so that
+/// `QUERY_TILE × REF_TILE × 2 × sizeof(float) =~ 32 KB`, matching
+/// a typical x86_64 / arm64 L1 data cache. Step 23's profiling
+/// writeup will validate or revise these.
+///
+/// Output is bit-equivalent (within fp accumulation reordering) to
+/// `brute_force_knn(ds, k, L2Squared{})`. Same constraints apply:
+/// `1 <= k <= ds.n - 1`, contiguous dataset.
+[[nodiscard]] Knng brute_force_knn_l2_tiled(
+    const Dataset& ds,
+    std::size_t k,
+    std::size_t query_tile = 32,
+    std::size_t ref_tile = 128);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

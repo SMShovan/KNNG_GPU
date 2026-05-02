@@ -190,6 +190,37 @@ BENCHMARK(BM_BruteForceL2Tiled_Synthetic)
     ->ArgsProduct({{1024}, {128}, {16, 32, 64}, {64, 128, 256}})
     ->Unit(benchmark::kMillisecond);
 
+#if defined(KNNG_HAVE_BLAS) && KNNG_HAVE_BLAS
+/// Step-21 BLAS variant. Same algebraic identity as the norms /
+/// tiled paths; the cross term is computed by `cblas_sgemm`. Big
+/// `n` and `d` are where BLAS earns its keep.
+void BM_BruteForceL2Blas_Synthetic(benchmark::State& state)
+{
+    const std::size_t n = static_cast<std::size_t>(state.range(0));
+    const std::size_t d = static_cast<std::size_t>(state.range(1));
+    constexpr std::size_t k = 10;
+    constexpr std::uint64_t seed = 42;
+
+    const knng::Dataset ds = make_synthetic(n, d, seed);
+
+    const knng::Knng truth = knng::cpu::brute_force_knn(
+        ds, k, knng::L2Squared{});
+    knng::Knng last;
+
+    for (auto _ : state) {
+        last = knng::cpu::brute_force_knn_l2_blas(ds, k);
+        benchmark::DoNotOptimize(last);
+        benchmark::ClobberMemory();
+    }
+
+    const double recall = knng::bench::recall_at_k(last, truth);
+    annotate(state, n, d, k, recall);
+}
+BENCHMARK(BM_BruteForceL2Blas_Synthetic)
+    ->ArgsProduct({{256, 512, 1024, 2048}, {32, 128}})
+    ->Unit(benchmark::kMillisecond);
+#endif  // KNNG_HAVE_BLAS
+
 void BM_BruteForceL2_Fvecs(benchmark::State& state)
 {
     const char* path = std::getenv("KNNG_BENCH_FVECS");

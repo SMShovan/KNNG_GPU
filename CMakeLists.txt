@@ -39,6 +39,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 # Shared helpers
 # --------------------------------------------------------------------------- #
 include(CompilerWarnings)
+include(FindKnngBlas)
 
 # Generate include/knng/version.hpp from the template.
 configure_file(
@@ -112,5 +113,6 @@ message(STATUS "  build type    : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ standard  : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  binary dir    : ${CMAKE_BINARY_DIR}")
+message(STATUS "  blas (Step 21): ${KNNG_HAVE_BLAS}")
 message(STATUS "------------------------------------")
 message(STATUS "")

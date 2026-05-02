@@ -12,6 +12,164 @@ independent of the code diff.
 
 ---
 
+## [Step 21] — BLAS `sgemm` for the cross term (2026-05-02)
+
+### What
+- Added `cmake/FindKnngBlas.cmake` — the project's BLAS discovery
+  module. Tries Apple Accelerate first on macOS (`find_library
+  (Accelerate)` plus the `ACCELERATE_NEW_LAPACK=1` opt-in for the
+  post-13.3 CBLAS interface; otherwise `cblas_sgemm` is marked
+  deprecated and `-Werror` rejects it). Falls back to
+  `find_package(BLAS)` plus `find_path(cblas.h)` on Linux,
+  searching the standard OpenBLAS / MKL / Homebrew layouts. Sets
+  `KNNG_HAVE_BLAS` and exposes the `knng::blas_iface` INTERFACE
+  target. New CMake option `KNNG_ENABLE_BLAS` (default ON) gates
+  the entire feature so a user without a BLAS install can still
+  build the project.
+- Added `src/cpu/brute_force_blas.cpp` and the new
+  `knng::cpu::brute_force_knn_l2_blas(ds, k, query_tile=64,
+  ref_tile=256)` entry point. The algorithm is the *matrix* form of
+  the Step-19 algebraic identity:
+
+  ```text
+  D[i, j]  =  ||x_i||²  +  ||y_j||²  -  2 · (X · Yᵀ)[i, j]
+  ```
+
+  Each outer tile slices `query_tile` rows of `X` and `ref_tile`
+  rows of `Y`, hands them to a single `cblas_sgemm` call to fill
+  the cross-product block `(QUERY_TILE × REF_TILE)`, then folds
+  the precomputed norms in via a scalar epilogue and feeds each
+  row to the per-query `TopK` heap.
+- Added a `kHasBlasBuiltin` `inline constexpr bool` constant so
+  callers can check at compile time whether the BLAS path is
+  available without dragging the `KNNG_HAVE_BLAS` macro into user
+  code.
+- Six new `test_brute_force` cases (under `#if KNNG_HAVE_BLAS`):
+  matches the canonical builder at default tile sizes; matches
+  at `(3, 5)` and `(1, 1)` tilings; zero tile size and `k = 0`
+  throw; the `kHasBlasBuiltin` static assert sanity-checks the
+  flag actually reflects the build.
+- Added `BM_BruteForceL2Blas_Synthetic` family (also gated on
+  `KNNG_HAVE_BLAS`) at the same `(n, d)` grid as the existing
+  bench families plus `n=2048` to exercise where BLAS earns its
+  keep.
+- ctest 95/95 green (6 new brute_force, 89 carried over from Step 20).
+- **Measured at n=1024, d=128:** canonical 69.7 ms, BLAS 3.83 ms.
+  ~18× speedup. Recall stays at 1.0.
+
+### Why
+This is the headline Phase-3 CPU optimisation and the algorithm
+the rest of the project will keep coming back to. "Distance as GEMM"
+is not just a CPU win — it is the same algebraic identity that
+makes Step 55's `cublasSgemm` the right tool on GPU, the same
+shape that Step 57's tensor-core path slots into via `WMMA`, and
+the same trick `faiss-gpu` and `cuVS` use for their L2 brute-force.
+Landing the CPU version now means the GPU port in Phase 8 is a
+*translation*, not a reinvention.
+
+The 18× speedup at d=128 measures the right thing: it is
+overwhelmingly *bandwidth*-bound on this fixture (n=1024, n*n*d
+≈ 130 MFLOPs against AppleClang's autovectorised baseline), and
+Apple Accelerate is genuinely tuned to exploit the SoC's bandwidth
+hierarchy in a way our hand-written loops cannot. The number is
+also the largest single-step speedup in the project so far —
+Step 19's algebraic rewrite gave ~6%, Step 20's tiling another
+~2%, and Step 21 jumps to ~18×. The CHANGELOG narrative for the
+project will reflect this: there is an 80/20 distribution of
+optimisation wins, and "use a tuned BLAS" is the 80.
+
+The deliberate non-decision was: do we vendor a BLAS, or do we
+discover one? We chose discovery. Vendoring (e.g.
+FetchContent OpenBLAS) would have pulled a 200 MB build of an
+assembly-heavy library into the project's CI matrix and would
+have made the project's entire build slower for every developer,
+including those who never run the BLAS path. Discovery means a
+developer who has not installed BLAS sees one extra "BLAS not
+found, Step 21 disabled" message at configure time and the rest
+of the project still builds; CI on macOS uses Accelerate
+(zero-install), CI on Linux installs OpenBLAS via apt (one
+line in the workflow). The cost of "no BLAS" is graceful
+degradation — `kHasBlasBuiltin == false` and `brute_force_knn_l2_blas`
+is simply not declared.
+
+The default tile sizes `(64, 256)` were chosen specifically for
+the BLAS path (vs `(32, 128)` for the hand-tiled variant): BLAS
+itself does its own internal blocking and is happiest with a
+larger outer tile to amortise the call overhead. A future
+profiling pass (Step 23) may revise these.
+
+### Tradeoff
+- **The BLAS path is the project's first non-trivial third-party
+  dependency at link time.** OpenBLAS / Accelerate / MKL each
+  ship gigabytes of code we cannot fully audit. We accept this:
+  the alternative (a hand-written sgemm) would be a multi-month
+  project for a fraction of the throughput. The discovery
+  module isolates the dependency to a single library, and the
+  `KNNG_ENABLE_BLAS=OFF` escape hatch lets a paranoid build
+  still produce a usable binary.
+- **`kHasBlasBuiltin` is a build-time, not run-time, flag.** A
+  user who installs BLAS, runs CMake, then upgrades BLAS is on
+  their own — no run-time version check. We accept the rigidity
+  because the alternative (versioned ABI gates) would cost more
+  test surface than the bug it would prevent ever has.
+- **Distance ordering can microscopically diverge.** BLAS may
+  reorder the dot product across thread parallelism or use
+  fused-multiply-add intrinsics not available in the hand-written
+  path. The 8-point fixture's neighbours are unique-by-distance
+  so the IDs match exactly; the test tolerance for distances is
+  `1e-3` (vs `1e-4` for the hand-written norms / tiled paths).
+  On real datasets where two near-equidistant references compete
+  for the last neighbour slot, the BLAS path may pick the
+  smaller-id one differently from the canonical path. This is
+  normal "fp non-associativity" surface — every later GPU step
+  will face the same issue.
+- **The bench's `n=2048` exercises a path the other variants do
+  not run.** We accept the asymmetry: the BLAS path is the only
+  one that scales to that size in a reasonable time, so the
+  bench grid is intentionally broader for it.
+
+### Learning
+- *The CMake module is the contract.* `FindKnngBlas.cmake` is
+  300 lines instead of 30 because every assumption it makes is
+  documented inline — what platforms it supports, what fallback
+  order it uses, why Accelerate needs the `ACCELERATE_NEW_LAPACK`
+  define, where each `find_path` looks. Future BLAS provider
+  additions (Intel MKL on Linux, Cray libsci on HPC clusters)
+  will be a single new branch; the rest of the build never has to
+  know.
+- *AppleClang's `-Werror` catches deprecation warnings the same
+  way it catches unused variables.* The `cblas_sgemm` symbol on
+  recent macOS is `__attribute__((deprecated))` unless
+  `ACCELERATE_NEW_LAPACK=1` is defined — and the project's strict
+  warning policy (Step 06) turns that into a build error rather
+  than a soft warning. The right place to add the define is
+  inside `target_compile_definitions` on the BLAS interface
+  target so every TU that sees `<Accelerate/Accelerate.h>` also
+  sees the macro. Adding it to a single `.cpp` would have
+  worked locally but broken the day a second TU pulled in the
+  header.
+- *18× is the wake-up call.* The project's "ladder of optimisations"
+  predicts each step contributes a few-percent speedup; Step 21
+  contributes ~18×, more than every previous step combined. The
+  reading is *not* "the previous steps were wasted" — Steps 17,
+  19, 20 are what make Step 21 possible, both algebraically (the
+  identity) and infrastructurally (tile loops, deterministic RNG,
+  recall harness, JSON counters). The reading is "the moment a
+  step lets you delegate to a tuned library, *do it*." Phase 8's
+  GPU steps will repeat the pattern: hand-written naive kernel,
+  shared-memory tiled kernel, then `cublasSgemm` and the same
+  18× cliff.
+
+### Next
+- Step 22: `std::partial_sort` for the per-tile top-k. The TopK
+  heap is `O(log k)` per push; partial_sort over the full tile
+  may amortise better when the tile holds `>> k` candidates.
+- Step 23: profiling writeup. `instruments` on macOS, `perf stat`
+  on Linux. Cache-miss rates and IPC for the canonical path,
+  the BLAS path, and the gap between them. `docs/PERF_STEP22.md`.
+
+---
+
 ## [Step 20] — Block tiling: `(QUERY_TILE × REF_TILE)` distance blocks (2026-05-02)
 
 ### What

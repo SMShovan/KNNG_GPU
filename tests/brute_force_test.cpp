@@ -340,4 +340,82 @@ TEST(BruteForceKnnL2Tiled, KGreaterThanNMinusOneThrowsInvalidArgument)
         std::invalid_argument);
 }
 
+#if defined(KNNG_HAVE_BLAS) && KNNG_HAVE_BLAS
+
+// ---------------------------------------------------------------------
+// Step 21: brute_force_knn_l2_blas — sgemm-backed cross-term path.
+// Must agree with the canonical L2 builder up to fp accumulation
+// reordering (BLAS reorders pretty aggressively, so the tolerance is
+// looser than for the norms / tiled paths).
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2Blas, MatchesCanonicalNeighborsAtDefaultTileSizes)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto blas_path = knng::cpu::brute_force_knn_l2_blas(
+        ds, std::size_t{3});
+
+    ASSERT_EQ(baseline.n, blas_path.n);
+    ASSERT_EQ(baseline.k, blas_path.k);
+
+    // Hand-verified fixture has neighbours unique-by-distance, so
+    // neighbour IDs match exactly. Distances match within a small
+    // absolute tolerance (BLAS may reorder the dot product).
+    EXPECT_EQ(baseline.neighbors, blas_path.neighbors);
+    for (std::size_t i = 0; i < baseline.distances.size(); ++i) {
+        EXPECT_NEAR(baseline.distances[i], blas_path.distances[i], 1e-3f)
+            << "i = " << i;
+    }
+}
+
+TEST(BruteForceKnnL2Blas, MatchesCanonicalWhenTilesSmallerThanN)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto blas_path = knng::cpu::brute_force_knn_l2_blas(
+        ds, std::size_t{3}, std::size_t{3}, std::size_t{5});
+
+    EXPECT_EQ(baseline.neighbors, blas_path.neighbors);
+}
+
+TEST(BruteForceKnnL2Blas, MatchesCanonicalWhenTilesAreOne)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{2}, knng::L2Squared{});
+    const auto blas_path = knng::cpu::brute_force_knn_l2_blas(
+        ds, std::size_t{2}, std::size_t{1}, std::size_t{1});
+
+    EXPECT_EQ(baseline.neighbors, blas_path.neighbors);
+}
+
+TEST(BruteForceKnnL2Blas, ZeroTileSizeThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_blas(
+            ds, std::size_t{3}, std::size_t{0}, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Blas, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_blas(ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Blas, BuiltinFlagReportsTrue)
+{
+    static_assert(knng::cpu::kHasBlasBuiltin,
+                  "Step 21 was compiled but the builtin flag says no");
+    EXPECT_TRUE(knng::cpu::kHasBlasBuiltin);
+}
+
+#endif  // KNNG_HAVE_BLAS
+
 } // namespace

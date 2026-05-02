@@ -97,6 +97,58 @@ namespace knng::cpu {
     std::size_t query_tile = 32,
     std::size_t ref_tile = 128);
 
+/// True iff the BLAS-backed builder
+/// `brute_force_knn_l2_blas` is compiled into this build of
+/// `knng::cpu`. Wraps the build-time `KNNG_HAVE_BLAS` macro into a
+/// compile-time constant callers can check without preprocessor
+/// guards in user code.
+inline constexpr bool kHasBlasBuiltin =
+#if defined(KNNG_HAVE_BLAS) && KNNG_HAVE_BLAS
+    true;
+#else
+    false;
+#endif
+
+#if defined(KNNG_HAVE_BLAS) && KNNG_HAVE_BLAS
+/// L2 brute-force builder using `cblas_sgemm` for the cross term.
+///
+/// This is the headline Phase-3 CPU optimisation. The algebraic
+/// identity from Step 19,
+///
+///     ||a - b||²  =  ||a||²  +  ||b||²  -  2 · ⟨a, b⟩
+///
+/// rewrites into the *matrix* form
+///
+///     D[i, j]  =  ||x_i||²  +  ||y_j||²  -  2 · (X · Yᵀ)[i, j]
+///
+/// where `X` and `Y` are tile-sized slices of the dataset. The
+/// expensive `(QUERY_TILE × REF_TILE × d)` matmul becomes a single
+/// `cblas_sgemm` call against an industrially-tuned BLAS — on
+/// macOS the Apple Accelerate framework, on Linux OpenBLAS / MKL —
+/// and the per-element norm fold-in is a tiny scalar epilogue.
+///
+/// This is also the algorithmic preview for Step 55's GPU port:
+/// `cublasSgemm` over device-side `X` and `Y` tiles, fused norm
+/// epilogue kernel, identical mathematical shape. The day Step 55
+/// ships, it is a translation, not a rederivation.
+///
+/// Output is bit-equivalent (within fp accumulation reordering) to
+/// `brute_force_knn(ds, k, L2Squared{})` on every test fixture.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point.
+/// @param query_tile Number of queries per outer tile (default 64).
+/// @param ref_tile Number of references per inner tile (default 256).
+/// @return A `Knng` of shape `(ds.n, k)`; rows sorted ascending by
+///         distance with ties broken by ascending neighbor index.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_blas(
+    const Dataset& ds,
+    std::size_t k,
+    std::size_t query_tile = 64,
+    std::size_t ref_tile = 256);
+#endif  // KNNG_HAVE_BLAS
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

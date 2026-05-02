@@ -12,6 +12,134 @@ independent of the code diff.
 
 ---
 
+## [Step 16] — JSON benchmark output (2026-05-02)
+
+### What
+- Added `include/knng/bench/runtime_counters.hpp` and
+  `src/bench/runtime_counters.cpp` with two helpers every bench TU
+  in the project will share:
+  * `peak_memory_mb()` — `getrusage(RUSAGE_SELF).ru_maxrss`
+    normalised across the macOS-bytes / Linux-kilobytes split. The
+    `#if defined(__APPLE__)` branch is the only place in the
+    project that needs to know the syscall's per-OS unit; every
+    bench reports a single MB value.
+  * `brute_force_distance_count(n)` — `n*(n-1)` lifted into a
+    single inline helper so every bench TU emits the same
+    `n_distance_computations` formula without re-derivation.
+- Updated `benchmarks/bench_brute_force.cpp` to wire the
+  project-standard counters into Google-Benchmark's `state.counters`
+  map: `recall_at_k`, `peak_memory_mb`, `n_distance_computations`,
+  plus the existing shape fields `n`, `d`, `k`. The fvecs path now
+  uses `knng::bench::load_or_compute_ground_truth` for its truth,
+  caching to `build/ground_truth/<stem>.k<K>.l2.gt`.
+- `recall_at_k` is computed via `knng::bench::recall_at_k(last,
+  truth)` rather than hard-coded to `1.0` even though brute-force
+  is its own ground truth — that way the day a refactor breaks
+  recall on brute-force, the value here drops below `1.0` and CI
+  catches it.
+- Added `tools/plot_bench.py`, a standalone Python 3 script that
+  ingests the JSON and renders three Matplotlib plots
+  (`recall@k`, wall time, peak memory) bucketed by dimensionality.
+  It is committed but is *not* part of the C++ build — it has no
+  CMake target. Dependencies: matplotlib + standard library only.
+  Field names are centralised at the top of the file so a future
+  counter rename is one Python edit and one C++ edit.
+- Verified end-to-end: `bench_brute_force --benchmark_format=json`
+  emits all three new counters per run; `ctest` is still 61/61
+  green; the plot script's `argparse --help` runs cleanly.
+
+### Why
+Step 12's harness produced wall time and `items_per_second` only —
+enough to ship the bench skeleton, not enough to defend any
+optimisation. Every later phase's argument is a *Pareto*
+argument: "I made it 5× faster while preserving recall@k≥0.97 and
+without growing peak memory beyond 1.2× the baseline." That
+argument needs all three numbers in one row of one JSON file, and
+it needs them in stable field names so a single plotting tool can
+ingest a year's worth of bench runs without bespoke per-step
+adapters.
+
+`peak_memory_mb` matters because several phases will deliberately
+trade memory for speed (Step 19's precomputed `||p||²` table,
+Step 20's tiling buffers, Step 55's GEMM workspace, Step 58's
+out-of-core streaming). Reporting peak RSS in every JSON row is
+the cheapest way to make those tradeoffs visible — `getrusage`
+costs one syscall per bench-end and produces a number that is
+honest about what the process actually allocated, not what the
+algorithm thought it allocated.
+
+`n_distance_computations` is the metric-independent throughput
+denominator. `items_per_second` already covers brute-force, but
+the moment NN-Descent ships in Phase 5, two builders with
+identical wall time can have wildly different distance counts.
+Reporting both lets a reader say "this builder is faster *and*
+cheaper" or "this builder is faster *but* paid for it in distance
+calls" without re-deriving from the algorithm.
+
+The plot script is a Python file, not a C++ target, because the
+project's CI matrix is C++-only and the plotting consumer (a
+human looking at a single run, or the docs job rendering the
+Phase 13 Pareto figure) has no business pulling Matplotlib into
+the standard developer build. Centralising the field-name
+constants at the top of `plot_bench.py` mirrors the same trick we
+use in the C++ side: rename a counter, edit two files, done.
+
+### Tradeoff
+- **`peak_memory_mb` is process-wide, not algorithm-only.** The
+  reported number includes Google Benchmark's own machinery and
+  the dataset still resident from previous benchmarks in the same
+  process. We accept this — the alternative (a custom allocator
+  hooked under `Knng` / `TopK` to track only "algorithm bytes")
+  would be 200 lines of wrapper code for a single counter that is
+  still only useful as a *trend*. RSS is the right granularity
+  for "did this commit blow up memory?"
+- **`recall_at_k` for brute-force is always 1.0.** Reporting it
+  anyway is *almost* free (one extra `recall_at_k` call after the
+  timed loop) and protects against a class of refactors where
+  someone accidentally passes neighbors-only or distances-only
+  through to the next pipeline stage. The cost of a single extra
+  intersection per bench is invisible next to the timed loop.
+- **No JSON-schema validation in `plot_bench.py`.** The script
+  simply ignores rows missing a counter field. That means a stale
+  JSON from an earlier step plots cleanly (just with empty memory
+  / recall lines) instead of crashing. We accept the loose
+  contract — the alternative pessimises common-case interactive
+  use.
+
+### Learning
+- *Google Benchmark's `Counter::kAvgThreads` is the right flag for
+  per-iteration averages.* The default `Counter::kAvgIterations`
+  divides by `state.iterations()`, which would silently halve the
+  reported recall when the bench runs 2× iterations to hit its
+  min-time target. `kAvgThreads` reports the value as-is,
+  unaltered by either iteration count or thread count — exactly
+  what we want for a "this is the recall of the *graph this
+  benchmark produced*" reading.
+- *`getrusage(RUSAGE_SELF).ru_maxrss` is one of those POSIX
+  surface-area surprises.* The man pages on Linux and macOS
+  document different units (kB vs bytes). Wrapping the
+  conversion in one place prevents every future bench TU from
+  re-rediscovering this; the `#if defined(__APPLE__)` is the
+  only place in the project that has to know.
+- *Plotting code wants to be language-separable from the
+  measurement code.* Five steps from now, we will want the same
+  plots for SIMD distance kernels (Step 27), GPU brute-force
+  (Step 49), GPU NN-Descent (Step 70). All three of those bench
+  TUs will emit the same JSON — same field names, same
+  semantics, same plot script. The investment in keeping the
+  Python out of the build pays off immediately.
+
+### Next
+- Step 17: deterministic XorShift64 wrapper with explicit seed.
+  The `make_synthetic` function in `bench_brute_force.cpp`
+  currently uses a literal `42` and `std::mt19937_64`; once the
+  XorShift64 wrapper exists, every bench TU and every
+  randomised algorithm will route its RNG through it so seeded
+  reproducibility becomes a project-wide property, not a
+  per-file convention.
+
+---
+
 ## [Step 15] — Recall@k computation (2026-05-02)
 
 ### What

@@ -17,6 +17,7 @@
 add_executable(bench_brute_force bench_brute_force.cpp)
 target_link_libraries(bench_brute_force
     PRIVATE
+        knng::bench
         knng::cpu
         knng::io
         benchmark::benchmark_main

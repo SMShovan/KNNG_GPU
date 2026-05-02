@@ -41,6 +41,7 @@ add_library(knng::io ALIAS knng_io)
 add_library(knng_bench STATIC
     bench/ground_truth.cpp
     bench/recall.cpp
+    bench/runtime_counters.cpp
 )
 target_link_libraries(knng_bench PUBLIC knng::cpu)
 knng_set_warnings(knng_bench)

@@ -12,6 +12,122 @@ independent of the code diff.
 
 ---
 
+## [Step 15] — Recall@k computation (2026-05-02)
+
+### What
+- Added `include/knng/bench/recall.hpp` and
+  `src/bench/recall.cpp` — the canonical quality metric every later
+  approximate builder reports alongside its wall time.
+- Public surface:
+  * `recall_at_k(approx, truth) → double` returning the fraction in
+    `[0, 1]` of `(point, neighbor)` pairs in the approximate graph
+    that also appear among the top-k neighbors of the same point in
+    the exact graph. Order inside a row is irrelevant; per-row
+    duplicates in `approx` are deduplicated before counting so a
+    malformed builder cannot inflate its score by repeating a
+    correct neighbor `k` times.
+  * `recall_at_k_row(approx, truth, row) → std::size_t` returning
+    the integer overlap count for a single row. Useful for
+    histograms and for tests that want to assert "every row is
+    fully recalled" without floating-point tolerance.
+  * Both functions throw `std::invalid_argument` on `(n, k)` shape
+    mismatches between the two graphs; the empty-input case
+    returns `1.0` (vacuous truth) so callers never need to
+    special-case it.
+- Implementation per row: sort `truth_row` once, binary-search each
+  unique `approx_row` ID into it. `O(k log k)` per row, no
+  per-row hash-table allocation. The dedup-tracking `seen` vector
+  is the only per-row scratch and is `reserve`'d to capacity-`k`.
+- New `test_recall` GTest binary with 11 cases: exact match,
+  scrambled order, zero overlap, partial overlap (hand-computed
+  6/12 = 0.5 fixture), duplicate inflation immunity, the per-row
+  accessor, n-mismatch / k-mismatch / row-out-of-range error paths,
+  the empty-graph identity, and an end-to-end "brute-force against
+  itself recalls 1.0" sanity check that catches future
+  refactors that silently drop or permute a neighbor field.
+- ctest now runs 61/61 green (11 new recall, 50 carried over from
+  Step 14).
+
+### Why
+Recall@k is the y-axis of every quality plot the project will
+produce — it is what "approximate KNNG" actually means. Without
+it, none of the speed gains in Phases 3–12 can be defended; an
+"infinitely fast" builder that returns garbage neighbors trivially
+wins on wall time. The metric needs to land *now*, before the
+first algorithmic optimisation in Phase 3, so every later step has
+the option of asserting "this change preserved recall to within
+ε" alongside "this change made the build N% faster."
+
+The set-intersection definition (rather than ordered-list
+overlap) is the standard used throughout the ANN literature
+(`ann-benchmarks`, FAISS, NEO-DNND). It is also the semantically
+correct one for KNN graph quality: if two builders both return the
+same correct three neighbors but in different orders, they
+produced equally good graphs. Penalising one for the order would
+just be measuring "which builder happens to sort the same way
+brute-force does," which is not a quality metric.
+
+The duplicate-immunity property in `row_intersection` is a
+deliberate guard against a bug class that NN-Descent in Phase 5
+will get extremely close to: a builder whose internal "atomic
+update of neighbor lists" loses CAS races and leaves the same id
+in two slots could otherwise score artificially high here. The
+test `DuplicatesInApproxRowDoNotInflate` pins the contract.
+
+`double` (not `float`) is the return type because at the n*k
+counts of interest (SIFT1M k=100 ⇒ 1e8 pairs) `float`'s 24-bit
+mantissa would lose unit-resolution. The regression suite in
+Phase 13 needs to detect a single-pair regression — a `float`
+return would silently round it away.
+
+### Tradeoff
+- **Per-row data structure is `std::vector` + `binary_search`,
+  not `std::unordered_set`.** For `k ≤ 1024` (the upper end of
+  practical evaluation), the vector path is cache-friendly,
+  allocates one block, and is comparable to or faster than an
+  unordered set. We will switch to the unordered path the day a
+  benchmark wants `k > 1024`; until then the `vector` path is
+  the right default.
+- **The function does not consume distances.** Two builders that
+  return the same neighbor set under different distances (e.g.
+  L2 vs negative inner product) will compare clean. That is the
+  intended contract — recall@k is about set agreement; whether
+  the chosen metric is "good for the task" is a separate concern
+  outside this function's scope.
+- **`recall_at_k_row` exists despite being one-line on the
+  caller side.** It is exposed so tests and future histograms
+  do not have to dig through the implementation; the cost is
+  three extra lines of header surface.
+
+### Learning
+- *The empty-graph case wants `1.0`, not `nan` and not a throw.*
+  The choice is between three reasonable answers; `1.0` (vacuous
+  truth — every neighbor in the approximate graph is in the truth)
+  composes cleanly with downstream pipelines that take a
+  weighted average of recall across many shards. The other two
+  choices would force callers to add an `if (n == 0) ... else ...`
+  branch at every aggregation site.
+- *gtest's `EXPECT_THROW` discards the expression's value.*
+  `recall_at_k` is `[[nodiscard]]`, so the standard `EXPECT_THROW(
+  recall_at_k(a, b), ...)` form trips a warning under our
+  `-Wunused-result -Werror` policy. Wrapping the call in
+  `{ (void)... ; }` inside the macro keeps the discard explicit
+  and silences the warning without weakening the function's
+  attribute. Worth remembering for the next [[nodiscard]] API the
+  project ships.
+
+### Next
+- Step 16: wire `recall_at_k` into the Google-Benchmark counter
+  map so `--benchmark_format=json` carries `recall_at_k` and
+  `peak_memory_mb` end to end. The bench binary will use
+  `load_or_compute_ground_truth` to obtain `truth` once per
+  benchmark process.
+- Step 17: deterministic XorShift64 wrapper. The recall harness
+  built here is the consumer that will assert "same seed →
+  same graph → same recall" for randomised builders.
+
+---
+
 ## [Step 14] — Ground-truth cache (2026-05-02)
 
 ### What

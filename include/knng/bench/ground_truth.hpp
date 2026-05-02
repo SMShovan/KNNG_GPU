@@ -58,7 +58,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
-#include <string>
 
 #include "knng/core/dataset.hpp"
 #include "knng/core/graph.hpp"

@@ -136,3 +136,24 @@ gtest_discover_tests(test_ground_truth
         LABELS "ground_truth"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_recall` exercises `knng::bench::recall_at_k` (Step 15) on
+# small hand-built graphs: exact match, scrambled order, partial
+# overlap, duplicates, shape-mismatch errors.
+add_executable(test_recall recall_test.cpp)
+target_link_libraries(test_recall
+    PRIVATE
+        knng::bench
+        GTest::gtest_main
+)
+knng_set_warnings(test_recall)
+
+set_target_properties(test_recall PROPERTIES
+    OUTPUT_NAME "test_recall"
+)
+
+gtest_discover_tests(test_recall
+    PROPERTIES
+        LABELS "recall"
+    DISCOVERY_TIMEOUT 10
+)

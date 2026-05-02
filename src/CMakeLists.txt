@@ -36,9 +36,11 @@ add_library(knng::io ALIAS knng_io)
 # binaries (`benchmarks/`), the regression suite (Phase 13), and any
 # unit tests that need them. Currently:
 #   * Step 14: ground-truth cache (compute-once-per-(dataset,k,metric))
+#   * Step 15: recall@k computation
 # Header-only utilities live alongside the .cpp under `include/knng/bench/`.
 add_library(knng_bench STATIC
     bench/ground_truth.cpp
+    bench/recall.cpp
 )
 target_link_libraries(knng_bench PUBLIC knng::cpu)
 knng_set_warnings(knng_bench)

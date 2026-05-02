@@ -12,6 +12,144 @@ independent of the code diff.
 
 ---
 
+## [Step 18] — Struct-of-Arrays layout: stride helpers + contiguity contract (2026-05-02)
+
+### What
+- Formalised the `Dataset` storage contract that every later
+  vectorisation, BLAS, and GPU step depends on. The layout itself
+  was already row-major contiguous; this step pins it as the
+  canonical shape, exposes the stride helpers later phases will
+  need, and documents *why* the layout matters in the file's
+  Doxygen so a future contributor cannot silently regress to a
+  vector-of-vectors.
+- Added five accessors to `knng::Dataset`:
+  * `stride()` — row stride in elements (always `d` today).
+  * `byte_stride()` — row stride in bytes; the natural denominator
+    for `cudaMemcpy2D`'s pitch and `cublasSgemm`'s LDA argument.
+  * `data_ptr()` — direct `float*` (and `const float*`) to the
+    contiguous buffer for BLAS calls, mmap, and GPU H2D transfers.
+  * `size()` — `n * d`, pre-named so callers do not recompute
+    the product (and risk a `size_t` overflow on pathological
+    inputs).
+  * `is_contiguous()` — cheap precondition check
+    (`data.size() == n * d`). `noexcept`, no allocation.
+- Expanded the file-level docs: a "Why a single flat float buffer,
+  not a vector-of-vectors?" section spelling out the three
+  reasons (vectorisation, cache locality, zero-copy GPU transfer)
+  with concrete intrinsic / API references; a re-titled
+  "Storage contract" section explicitly listing every
+  guarantee callers can rely on.
+- Added six new `Dataset` test cases in `tests/core_test.cpp`
+  (15 → 21 total): stride / byte_stride / size return the
+  row-major formula; `data_ptr()` aliases `data.data()` for both
+  const and non-const overloads; `is_contiguous()` returns true
+  for fresh datasets, false after a manual `data.resize()` that
+  breaks the invariant; the empty dataset is contiguous; row
+  addresses derive from `data_ptr() + i * stride()`.
+- ctest 78/78 green (6 new core, 72 carried over from Step 17).
+
+### Why
+The plan calls Step 18 (formerly Step 17 in the original
+numbering) "Struct-of-Arrays layout — Replace ad-hoc row-major
+with `Dataset::data` as `float[n*d]` row-major contiguous +
+stride helpers." The layout already existed (Step 07 shipped it),
+but as an *implementation choice*, not a contract. Step 18
+promotes it to a contract:
+
+  1. **Every later optimisation will assume this shape.** Step 19
+     precomputes `||p||²` by iterating `data_ptr() + i * stride()`
+     `d` floats at a time; Step 20 dispatches L1-tile blocks of
+     `(QUERY_TILE × REF_TILE)` rows directly off `data_ptr()`;
+     Step 21 hands the buffer to `cblas_sgemm(..., A=data_ptr(),
+     LDA=stride(), ...)` as-is; Step 49's CUDA brute-force
+     `cudaMemcpy`s the buffer in one call. None of those steps
+     should re-derive "is the buffer contiguous?" — the type
+     should already say so.
+  2. **The accessors give later phases a single rename point.**
+     A future GPU path that wants 32-byte-aligned row stride for
+     `__ldg` coalescing will introduce a *separate* type
+     (`PaddedDataset`) rather than complicate this one — but the
+     existing call sites all read `ds.stride()` rather than `ds.d`,
+     so the day a builder migrates from `Dataset` to
+     `PaddedDataset` it is a type-substitution, not a rewrite of
+     the inner loop.
+  3. **`is_contiguous()` lets the precondition checks be cheap and
+     visible.** Future builders will gain
+     `assert(ds.is_contiguous())` at the top of their hot path —
+     compiled to nothing in release, fires immediately in debug
+     when a deserialiser produces a mis-shaped input.
+
+The "Struct-of-Arrays" name in the plan is slightly misleading:
+*true* SoA would put each coordinate dimension in its own buffer
+(`x[0..n], y[0..n], ..., d_{D-1}[0..n]`), and that layout would
+be wrong for our access pattern (the inner loop is over the
+coordinates of *one* point, not over many points' shared
+coordinate). What we have — and what the plan actually wants — is
+a single flat row-major buffer with explicit stride. The
+contract-level renaming "row-major contiguous + stride helpers"
+in the docs is more accurate than the phase title.
+
+### Tradeoff
+- **`data` stays a public field.** Locking it private would force
+  every existing call site (`fvecs.cpp`'s loader, the bench
+  harness, every test that initialises a fixture) through
+  accessors. The cost is real and the upside is small — `Dataset`
+  is a value type with no class invariants beyond
+  `data.size() == n * d`, and `is_contiguous()` lets callers
+  enforce that without owning the field. We will revisit when
+  there is an actual reason to (e.g. future versions need to
+  enforce alignment), not pre-emptively.
+- **`is_contiguous()` is the only invariant check.** A more
+  paranoid contract would also forbid `n * d` overflow; instead,
+  the constructor's allocation already throws `std::bad_alloc` on
+  pathological sizes and the project's
+  `-Wconversion -Werror` policy catches signed/unsigned
+  shenanigans at compile time. Layered defences here would just
+  duplicate what the toolchain already gives us.
+- **No alignment guarantees.** `std::vector<float>` allocates
+  with the default new-expression alignment, which is `alignof(std::max_align_t)`
+  on every supported platform — sufficient for `_mm256_load_ps`
+  (32-byte) on x86_64 and `vld1q_f32` (16-byte) on arm64. Future
+  steps that need 64-byte alignment (Step 57's tensor-core path)
+  will introduce an aligned-allocator variant; today the default
+  is correct.
+
+### Learning
+- *Pinning a contract is a separate commit from honouring it.*
+  The accessors land here, in a small step that only adds API
+  surface and tests. Step 19 will then *use* `data_ptr()` and
+  `stride()` in a meaningful way, and the diff for Step 19 will
+  read as "swap one access pattern for another" rather than "swap
+  the access pattern *and* introduce the helpers it depends on." The
+  same pattern repeats throughout Phase 3: small, easily-reviewed
+  contract-narrowing commits before the optimisation that consumes
+  the new contract.
+- *Stride is a concept, `d` is an implementation detail.* They
+  are equal today and likely always will be in this codebase, but
+  the moment any caller writes `ds.stride()` instead of `ds.d`,
+  the day a future variant needs padding becomes a type change
+  rather than a code-base sweep. This is the same pattern as
+  using `std::size_t` instead of `unsigned long`: the symbol
+  carries the meaning, not the integer.
+- *Every contract should ship with a one-line invariant check.*
+  `is_contiguous()` is two arithmetic ops, but the day a binary
+  format reader produces a `Dataset` whose `data.size()` does not
+  match `n * d`, `assert(ds.is_contiguous())` at the top of the
+  algorithm catches it at the call site instead of as a buffer
+  overrun ten frames into the inner loop. This will scale
+  pleasantly: Step 19 will add `assert(ds.is_contiguous())` to
+  the brute-force entry; Step 21 will add it to the BLAS path;
+  every later GPU kernel will assert it once on the host side
+  before launching.
+
+### Next
+- Step 19: precompute `||p||²` per point and rewrite squared-L2
+  as `||a||² + ||b||² - 2⟨a,b⟩`. The first measurable Phase 3
+  optimisation; expected ~30% speedup. Will use `data_ptr()` +
+  `stride()` from this step.
+
+---
+
 ## [Step 17] — Deterministic RNG (`knng::random::XorShift64`) (2026-05-02)
 
 ### What

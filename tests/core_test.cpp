@@ -171,4 +171,58 @@ TEST(Dataset, MutatingRowViewIsReflectedInUnderlyingStorage)
     EXPECT_FLOAT_EQ(ds.data[5], 3.5f);
 }
 
+TEST(Dataset, StrideHelpersReturnRowMajorD)
+{
+    const knng::Dataset ds(7, 16);
+    EXPECT_EQ(ds.stride(), std::size_t{16});
+    EXPECT_EQ(ds.byte_stride(), std::size_t{16 * sizeof(float)});
+    EXPECT_EQ(ds.size(), std::size_t{7 * 16});
+}
+
+TEST(Dataset, DataPtrAddressesUnderlyingBuffer)
+{
+    knng::Dataset ds(3, 4);
+    ds.data_ptr()[0] = 1.0f;
+    ds.data_ptr()[1] = 2.0f;
+    EXPECT_FLOAT_EQ(ds.data[0], 1.0f);
+    EXPECT_FLOAT_EQ(ds.data[1], 2.0f);
+
+    const knng::Dataset& cds = ds;
+    EXPECT_EQ(cds.data_ptr(), cds.data.data());
+}
+
+TEST(Dataset, IsContiguousHoldsForFreshlyConstructedDataset)
+{
+    knng::Dataset ds(5, 8);
+    EXPECT_TRUE(ds.is_contiguous());
+}
+
+TEST(Dataset, IsContiguousFlagsSizeMismatch)
+{
+    // The contract is `data.size() == n * d`. If a caller manually
+    // resizes the buffer (or, more realistically, miscomputes a
+    // shape after deserialisation), is_contiguous flags it.
+    knng::Dataset ds(5, 8);
+    ds.data.resize(20);  // 5 * 8 == 40 expected
+    EXPECT_FALSE(ds.is_contiguous());
+}
+
+TEST(Dataset, EmptyDatasetIsContiguous)
+{
+    const knng::Dataset ds;  // 0×0
+    EXPECT_TRUE(ds.is_contiguous());
+    EXPECT_EQ(ds.size(), std::size_t{0});
+    EXPECT_EQ(ds.stride(), std::size_t{0});
+}
+
+TEST(Dataset, RowsAddressesDeriveFromStride)
+{
+    knng::Dataset ds(4, 5);
+    // Row i must start exactly stride() * i floats into the buffer.
+    for (std::size_t i = 0; i < ds.n; ++i) {
+        EXPECT_EQ(ds.row(i).data(),
+                  ds.data_ptr() + i * ds.stride());
+    }
+}
+
 } // namespace

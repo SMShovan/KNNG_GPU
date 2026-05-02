@@ -12,6 +12,148 @@ independent of the code diff.
 
 ---
 
+## [Step 14] — Ground-truth cache (2026-05-02)
+
+### What
+- Added `include/knng/bench/ground_truth.hpp` and
+  `src/bench/ground_truth.cpp`, the brute-force ground-truth cache
+  every later recall / regression measurement will key off.
+- Public surface of `knng::bench`:
+  * `enum class MetricId { kL2 = 0, kNegativeInnerProduct = 1 }` —
+    the runtime-side metric tag, matching the `metric_id` field of
+    Step 13's `.knng` format so `.gt` and `.knng` readers share one
+    enumeration.
+  * `dataset_hash(const Dataset&)` — 64-bit FNV-1a digest over
+    `(n, d, raw float bytes)`. Stable across copies, sensitive to
+    any byte change, mixes shape into the digest so two reshapes
+    of the same payload still hash distinctly.
+  * `save_ground_truth` / `load_ground_truth` — read-write round-trip
+    against a documented 64-byte header + payload format. The save
+    path writes to `path + ".tmp"` and renames into place so a
+    crash mid-write cannot leave a partially-populated cache file.
+  * `load_or_compute_ground_truth` — the convenience entry point.
+    On hit, returns the cached graph; on miss, runs
+    `knng::cpu::brute_force_knn` under the requested metric and
+    persists the result before returning it.
+  * `default_cache_path` — convention for the cache filename
+    (`<dataset_stem>.k<K>.<metric_tag>.gt`) so a single cache dir
+    can hold many `(dataset, k, metric)` triples without
+    filename collisions. Hash is *not* in the filename — it lives
+    inside the file, where stale-but-similarly-named caches can be
+    detected on load rather than masked.
+- New `knng::bench` static library target wired into
+  `src/CMakeLists.txt` and a new `test_ground_truth` GTest binary
+  with 10 cases covering hash stability under copy, hash sensitivity
+  to coordinate flips and shape flips, round-trip equality of
+  neighbors / distances, key rejection on `k`, metric, and
+  dataset-hash mismatch, missing-file and corrupt-file handling
+  (returns `nullopt`, never throws), the load-or-compute miss-then-
+  hit lifecycle, and the `default_cache_path` filename convention.
+- `ctest` now runs 50/50 green (10 new ground_truth, 40 carried over
+  from Step 13).
+
+### Why
+Every later quantitative claim in this project — recall@k from
+Step 15, the Pareto plot in Step 100, the regression baseline in
+Phase 13 — needs an *exact* nearest-neighbor graph to compare an
+approximate builder against. Recomputing brute-force on every
+benchmark run would couple every micro-bench to the wall-time of
+the thing it is trying to measure (a single brute-force on SIFT1M
+already takes minutes on a laptop), and it would silently mask the
+case where two adjacent benchmarks accidentally use *different*
+ground truths. Pinning ground truth in a content-addressed file is
+the project's first piece of "measurement infrastructure that other
+measurements stand on."
+
+The choice of FNV-1a over SHA-256 / MD5 / xxh3 was deliberate. FNV-1a
+has zero dependencies, is trivial to read in this `.cpp`, runs at
+GB/s on commodity hardware, and is overwhelmingly collision-free at
+the n×d sizes we care about (cache use is detection of *change*, not
+adversarial integrity). xxh3 would be ~5× faster but adds a
+single-purpose third-party dependency the project does not
+otherwise need; SHA-256 is several × slower than FNV-1a and signals
+"cryptographic integrity," which is a stronger claim than the cache
+actually makes. The hash function is private to this file — if we
+ever change it, we bump `format_version` and existing caches become
+misses (correct, conservative behaviour).
+
+The 64-byte fixed-width header mirrors Step 13's `.knng` layout
+deliberately. Both formats end up living next to each other on
+disk, both use the same `metric_id` encoding, both reserve their
+last 16–20 bytes for forward-compatibility growth. Two formats that
+share a mental model beat two formats that don't, even when the
+ABI cost is just a handful of bytes.
+
+The atomic-rename-on-write is non-negotiable. Without it, a SIGINT
+during a multi-minute SIFT1M ground-truth build leaves a partial
+file that the next run reads, validates against the cache key (the
+header passes!), and silently uses to compute meaningless recall
+numbers. The temp-file + `std::filesystem::rename` pattern is the
+POSIX-portable way to guarantee a reader sees either the old file
+or the fully-written new file, never an in-between state.
+
+### Tradeoff
+- **The cache validates `(n, k, metric, dataset_hash)` but not
+  `(d, distance ordering)`.** A dataset that hashes the same but
+  was loaded under a different metric ordering would in theory
+  produce a stale cache, but every metric ordering we ship is a
+  pure function of the data — `L2Squared` and
+  `NegativeInnerProduct` will always produce the same KNN for
+  bit-identical input. The check could be tightened later if a
+  metric grows configuration; today it would be premature.
+- **Hash is little-endian-only.** Same caveat as `src/io/fvecs.cpp`
+  — every supported development platform is little-endian. A
+  big-endian port would byte-swap before mixing into FNV-1a,
+  guarded on `std::endian::native`. Not on the current roadmap.
+- **`load_ground_truth` returns `optional`, not a richer error.**
+  Cache misses are common (any flag flip invalidates them), so a
+  diagnostic stream would just be noise. If a user reports "my
+  cache never seems to hit," we add a `--verbose` debug flag in
+  the consumer (Step 16 onwards) rather than complicate this API.
+- **No cache eviction policy.** A long-lived `cache_dir` will
+  accumulate one file per `(dataset, k, metric)` triple ever run.
+  Each file is ~`8*n*k` bytes (e.g. ~80 MB for SIFT1M k=10), so a
+  full benchmark sweep stays well under a developer's disk budget.
+  We will add eviction when the regression suite in Phase 13 needs
+  it; today it would be premature.
+
+### Learning
+- *Atomic rename is a stronger guarantee than `fsync` alone.* We
+  considered just `fflush` + `close` on the destination file, but
+  that does not survive a crash mid-write — the file is created
+  before its bytes are durable. Writing to `path + ".tmp"` and
+  renaming into place is the standard POSIX trick: `rename(2)` is
+  atomic for files on the same filesystem, so a reader sees
+  exactly one of {old file, new file, no file}. The fallback
+  copy-then-delete branch handles the rare case of a temp file
+  landing on a different filesystem from the destination.
+- *Cache keys live inside the file, not in the filename.* The
+  alternative of `<stem>.<dataset_hash>.k<K>.<metric>.gt` was
+  considered — it would let a `glob` see at-a-glance which keys
+  a cache holds. We rejected it: the filename then duplicates the
+  source of truth (the in-file header), and a renamed-by-hand cache
+  could lie about its own contents without the loader noticing. By
+  putting every cache-key field in the header and validating each
+  on load, the filename becomes pure ergonomics — humans read it,
+  the code does not trust it.
+- *FNV-1a is enough for "did this dataset change?".* It would not
+  be enough for "are these two datasets the same authored object"
+  (an attacker can craft collisions trivially), but the cache is
+  not a security boundary — it is a developer-time optimisation
+  whose worst-case failure mode is a stale read on the next run.
+  Picking the simplest hash that matches the threat model keeps
+  this file at ~250 lines instead of 600.
+
+### Next
+- Step 15: `knng::bench::recall(approx, truth, k) → double`. The
+  ground-truth cache built here is the `truth` argument; recall
+  is the first measurement on top of it.
+- Step 16: wire `recall_at_k` and `peak_memory_mb` into the
+  Google-Benchmark counter map so `--benchmark_format=json` carries
+  the new fields end to end.
+
+---
+
 ## [Step 13] — End-to-end CLI `build_knng` (2026-05-01)
 
 ### What

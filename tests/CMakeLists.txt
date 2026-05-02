@@ -115,3 +115,24 @@ gtest_discover_tests(test_fvecs
         LABELS "fvecs"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_ground_truth` exercises the brute-force ground-truth cache
+# (Step 14): dataset hash stability, round-trip serialisation,
+# cache-key validation, and the load-or-compute convenience.
+add_executable(test_ground_truth ground_truth_test.cpp)
+target_link_libraries(test_ground_truth
+    PRIVATE
+        knng::bench
+        GTest::gtest_main
+)
+knng_set_warnings(test_ground_truth)
+
+set_target_properties(test_ground_truth PROPERTIES
+    OUTPUT_NAME "test_ground_truth"
+)
+
+gtest_discover_tests(test_ground_truth
+    PROPERTIES
+        LABELS "ground_truth"
+    DISCOVERY_TIMEOUT 10
+)

@@ -31,3 +31,15 @@ add_library(knng_io STATIC
 target_link_libraries(knng_io PUBLIC knng::core)
 knng_set_warnings(knng_io)
 add_library(knng::io ALIAS knng_io)
+
+# `knng::bench` — benchmark-side primitives shared between the bench
+# binaries (`benchmarks/`), the regression suite (Phase 13), and any
+# unit tests that need them. Currently:
+#   * Step 14: ground-truth cache (compute-once-per-(dataset,k,metric))
+# Header-only utilities live alongside the .cpp under `include/knng/bench/`.
+add_library(knng_bench STATIC
+    bench/ground_truth.cpp
+)
+target_link_libraries(knng_bench PUBLIC knng::cpu)
+knng_set_warnings(knng_bench)
+add_library(knng::bench ALIAS knng_bench)

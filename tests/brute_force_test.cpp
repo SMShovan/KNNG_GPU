@@ -340,6 +340,72 @@ TEST(BruteForceKnnL2Tiled, KGreaterThanNMinusOneThrowsInvalidArgument)
         std::invalid_argument);
 }
 
+// ---------------------------------------------------------------------
+// Step 22: brute_force_knn_l2_partial_sort — std::partial_sort over
+// the full per-query candidate buffer instead of the streaming
+// TopK heap. Must agree with the canonical L2 path elementwise.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2PartialSort, MatchesCanonicalNeighborsAndDistances)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto ps = knng::cpu::brute_force_knn_l2_partial_sort(
+        ds, std::size_t{3});
+
+    ASSERT_EQ(baseline.n, ps.n);
+    ASSERT_EQ(baseline.k, ps.k);
+    EXPECT_EQ(baseline.neighbors, ps.neighbors);
+    for (std::size_t i = 0; i < baseline.distances.size(); ++i) {
+        EXPECT_NEAR(baseline.distances[i], ps.distances[i], 1e-4f);
+    }
+}
+
+TEST(BruteForceKnnL2PartialSort, RowsAreSortedAscendingByDistance)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto g = knng::cpu::brute_force_knn_l2_partial_sort(
+        ds, std::size_t{5});
+    for (std::size_t q = 0; q < g.n; ++q) {
+        const auto distances = g.distances_of(q);
+        for (std::size_t j = 1; j < distances.size(); ++j) {
+            EXPECT_LE(distances[j - 1], distances[j])
+                << "row " << q << " column " << j;
+        }
+    }
+}
+
+TEST(BruteForceKnnL2PartialSort, KEqualsOneMatchesCanonical)
+{
+    // Tie-break must match the heap path even at k=1, where the
+    // order of equal-distance candidates is most visible.
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{1}, knng::L2Squared{});
+    const auto ps = knng::cpu::brute_force_knn_l2_partial_sort(
+        ds, std::size_t{1});
+    EXPECT_EQ(baseline.neighbors, ps.neighbors);
+}
+
+TEST(BruteForceKnnL2PartialSort, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_partial_sort(
+            ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2PartialSort, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_partial_sort(
+            ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
 #if defined(KNNG_HAVE_BLAS) && KNNG_HAVE_BLAS
 
 // ---------------------------------------------------------------------

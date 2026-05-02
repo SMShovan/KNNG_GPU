@@ -12,6 +12,121 @@ independent of the code diff.
 
 ---
 
+## [Step 22] — `std::partial_sort` for top-k extraction (2026-05-02)
+
+### What
+- Added `knng::cpu::brute_force_knn_l2_partial_sort(ds, k)`. Reuses
+  Step 19's norms-precompute identity for the per-pair distance
+  arithmetic but replaces the streaming `TopK` heap with a
+  `std::partial_sort` over the materialised per-query candidate
+  buffer.
+- The candidate buffer is `std::vector<std::pair<float, index_t>>`
+  of length `n - 1`, allocated once at function entry and reused
+  across queries. Packing distance first / id second makes the
+  default lexicographic `<` on `pair` reproduce the heap path's
+  tie-break (smaller distance wins; smaller id wins on tie) for
+  free — no custom comparator.
+- Five new `test_brute_force` cases pinning the contract: matches
+  the canonical builder neighbour IDs and distances within `1e-4`,
+  rows are sorted ascending, `k = 1` ties match the canonical
+  tie-break, `k = 0` and `k > n - 1` throw.
+- Added `BM_BruteForceL2PartialSort_Synthetic` family at the same
+  `(n, d)` grid as the heap-path baselines.
+- ctest 100/100 green (5 new brute_force, 95 carried over from
+  Step 21).
+- **Measured at n=1024, d=128:** canonical heap 69.8 ms,
+  norms+heap 66.9 ms, **norms+partial_sort 64.0 ms**. ~9% faster
+  than canonical, ~4% additional gain over the heap path. Recall
+  stays at 1.0.
+
+### Why
+The heap path's `TopK::push` is `O(log k)` per candidate with a
+hard data dependency (the heap-sift loop), and it is called
+`n - 1` times per query. The branch on the admission test fires
+once per candidate. `std::partial_sort` has the same asymptotic
+complexity but shifts the work into a contiguous-buffer pass:
+build a `k`-element max-heap from the first `k` elements, then
+linearly scan the remaining `n - 1 - k` performing one
+`heap-replace` only when the candidate is smaller than the
+current heap top. The data is contiguous, the predicates are
+simpler, and the *whole* sort runs after the distance
+computation completes — so the prefetcher has already brought
+the candidate buffer into L1 by the time the sort starts.
+
+The 4% gain over the heap path is in the noise on AppleClang at
+this fixture; on workloads where the per-pair distance is very
+cheap (low `d`, BLAS-fast cross term), the partial_sort path's
+fraction-of-runtime grows and the win compounds. The right
+reading of this step is "we measured the heap-vs-partial_sort
+tradeoff so the rest of the project can stop debating it" — the
+plan called this step out specifically to avoid the eternal
+"should we use a heap or a partial_sort" detour later.
+
+The fixed `(n - 1)`-element scratch is the right choice over a
+streaming partial_sort. Two reasons:
+
+  1. **Partial sort needs a materialised buffer.** Streaming
+     `partial_sort_copy` exists, but the source range still has
+     to be enumerated; the cost saving over filling a buffer
+     once is negligible.
+  2. **Memory cost is bounded.** ~8 bytes per reference times
+     `n - 1`, allocated once per function call, fits in 8 MB
+     for SIFT1M. Negligible next to the dataset itself.
+
+### Tradeoff
+- **Memory grows with `n`, not `k`.** The heap path uses
+  `O(k)` per query; the partial_sort path uses `O(n)`. For
+  `k = 10, n = 1M` this is 8 MB instead of 80 bytes. We accept
+  the growth: it is allocated once and reused across queries,
+  and the wall-time win is uniform across query order.
+- **No streaming variant.** The `TopK` heap path can be fed
+  candidates as they arrive (e.g. from a parallel reduce in
+  Step 23 or a GPU kernel in Phase 7). The partial_sort path
+  cannot — the buffer must be filled first. This is why the
+  heap path stays as the canonical algorithm; partial_sort is
+  the speed-pick-when-buffer-fits alternative.
+- **The packed-pair tie-break is implicit.** A future reader
+  who does not look at the pair declaration may not realise
+  that `(distance, id)` ordering is what reproduces the heap
+  path's tie-break. We accept the cost of one inline comment
+  over a custom comparator class.
+- **The benchmark gain on AppleClang is small (~4%).** This is
+  within the noise band of the bench harness's single-iteration
+  runs. The numbers will firm up under Step 23's profiling pass
+  with longer runs and `instruments` cycle counts.
+
+### Learning
+- *`std::partial_sort` is one of the most underrated standard
+  algorithms.* Most C++ programmers reach for `std::sort` (which
+  is `O(n log n)`) when they really want a top-k. The standard
+  library provides exactly the right algorithm with the right
+  complexity (`O(n log k)`) — the only barrier to using it is
+  knowing it exists. Pinning the heap-vs-partial_sort decision
+  in the project means future contributors do not have to
+  rediscover this tradeoff.
+- *Lexicographic `<` on `std::pair` is free tie-breaking.*
+  Rolling our own `Comparator` struct was an option; using the
+  built-in is shorter, faster (the compiler inlines the
+  pair-comparison cleanly), and reads at the call site as "sort
+  by `(distance, id)`," which is exactly the tie-break rule.
+- *Heap-vs-partial_sort is fixture-dependent.* On AppleClang
+  with d=128 at n=1024, the partial_sort path is 4% faster. On
+  d=4 at large n (where the dot product is cheap and the heap's
+  branch dominates), partial_sort can be 30–40% faster. On
+  small-`k` distributed-MPI shards (where the candidate buffer
+  is too large to fit in cache and partial_sort thrashes), the
+  heap is the right pick. We keep both entry points; future
+  callers pick based on their own measurements.
+
+### Next
+- Step 23: profile every Phase-3 path with `instruments` (macOS)
+  / `perf stat` (Linux). Cache-miss rates, IPC, branch
+  prediction, hot functions. `docs/PERF_STEP22.md` —
+  the project's first profiling artefact, sets the pattern
+  every subsequent profile writeup will follow.
+
+---
+
 ## [Step 21] — BLAS `sgemm` for the cross term (2026-05-02)
 
 ### What

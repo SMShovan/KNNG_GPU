@@ -149,6 +149,41 @@ inline constexpr bool kHasBlasBuiltin =
     std::size_t ref_tile = 256);
 #endif  // KNNG_HAVE_BLAS
 
+/// L2 brute-force builder using `std::partial_sort` instead of the
+/// streaming `TopK` heap.
+///
+/// Uses Step 19's norms-precompute identity for the distance
+/// computation, then materialises the full `(n - 1)`-element
+/// candidate buffer per query and runs `std::partial_sort` to
+/// extract the `k` smallest. The contrast with the heap path:
+///
+///   * `TopK` is `O(log k)` per push; total `O((n-1) log k)` per
+///     query. The streaming admission test branches on every
+///     candidate. Cache-friendly only by accident.
+///   * `std::partial_sort` over a contiguous `n - 1`-element buffer
+///     is `O((n-1) log k)` *worst-case* but with much better
+///     constants — the algorithm is a max-heapify over the first k
+///     elements followed by a single linear scan with sift-down.
+///     The buffer is contiguous; the inner loop branches less.
+///
+/// Tie-breaking matches the heap path: equal distances are broken
+/// by ascending neighbor id, so the output is bit-equivalent (up to
+/// fp accumulation reordering of the dot product itself) to
+/// `brute_force_knn_l2_with_norms` on every test fixture.
+///
+/// Memory cost: one `(n - 1)`-element scratch buffer of
+/// `(index_t, float)` pairs, allocated once and reused across
+/// queries. ~8 bytes per reference.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point.
+/// @return A `Knng` of shape `(ds.n, k)`; rows sorted ascending by
+///         distance with ties broken by ascending neighbor index.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_partial_sort(
+    const Dataset& ds,
+    std::size_t k);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

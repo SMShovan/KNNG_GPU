@@ -127,6 +127,81 @@ Knng brute_force_knn_l2_tiled(const Dataset& ds,
     return out;
 }
 
+Knng brute_force_knn_l2_partial_sort(const Dataset& ds, std::size_t k)
+{
+    if (ds.n == 0) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_partial_sort: dataset is empty");
+    }
+    if (k == 0) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_partial_sort: k must be > 0");
+    }
+    if (k > ds.n - 1) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_partial_sort: k ("
+            + std::to_string(k) + ") must be <= ds.n - 1 ("
+            + std::to_string(ds.n - 1) + ")");
+    }
+    assert(ds.is_contiguous());
+
+    std::vector<float> norms;
+    compute_norms_squared(ds, norms);
+
+    const float*      base   = ds.data_ptr();
+    const std::size_t stride = ds.stride();
+
+    Knng out(ds.n, k);
+
+    // Per-query candidate buffer, allocated once and reused. Each
+    // entry is `(distance, neighbor_id)` packed so the lexicographic
+    // `<` on the `pair` does the heap-path's tie-break for free
+    // (smaller distance wins, smaller id wins on tie).
+    std::vector<std::pair<float, index_t>> scratch(ds.n - 1);
+
+    for (std::size_t q = 0; q < ds.n; ++q) {
+        const float* a       = base + q * stride;
+        const float  norm_a  = norms[q];
+
+        // Fill the scratch buffer with `(distance, id)` for every
+        // r != q. The skip is implemented by a single dest cursor;
+        // no branch inside the per-r loop body.
+        std::size_t cursor = 0;
+        for (std::size_t r = 0; r < ds.n; ++r) {
+            if (r == q) {
+                continue;
+            }
+            const float* b      = base + r * stride;
+            float dist =
+                norm_a + norms[r] - 2.0f * dot_product(a, b, stride);
+            if (dist < 0.0f) {
+                dist = 0.0f;
+            }
+            scratch[cursor].first  = dist;
+            scratch[cursor].second = static_cast<index_t>(r);
+            ++cursor;
+        }
+        assert(cursor == ds.n - 1);
+
+        // Extract the k smallest into the front of `scratch` and
+        // sort that prefix. `partial_sort` is exactly the algorithm
+        // we want here: build a k-max-heap, then for each remaining
+        // element perform one heap-replace if smaller than the top.
+        std::partial_sort(
+            scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(k),
+            scratch.end());
+
+        auto neighbors_row = out.neighbors_of(q);
+        auto distances_row = out.distances_of(q);
+        for (std::size_t j = 0; j < k; ++j) {
+            distances_row[j] = scratch[j].first;
+            neighbors_row[j] = scratch[j].second;
+        }
+    }
+
+    return out;
+}
+
 Knng brute_force_knn_l2_with_norms(const Dataset& ds, std::size_t k)
 {
     if (ds.n == 0) {

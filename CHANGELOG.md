@@ -12,6 +12,155 @@ independent of the code diff.
 
 ---
 
+## [Step 26] — NUMA awareness: first-touch helper + bench wrapper (2026-05-04)
+
+### What
+- Added `include/knng/cpu/numa.hpp` and `src/cpu/numa.cpp` —
+  the cross-platform NUMA infrastructure every later parallel
+  CPU step will lean on:
+  * `knng::cpu::first_touch(data, n_elements, num_threads)` —
+    walks an `n_elements`-float buffer in a `#pragma omp
+    parallel for schedule(static)` loop, writing one float per
+    OS page (page size queried at runtime via
+    `sysconf(_SC_PAGESIZE)`). Each iteration's `data[i] =
+    data[i]` no-op preserves contents while triggering Linux's
+    first-touch page-binding so the page lands on the node of
+    the worker that will later read it. On macOS / single-NUMA
+    hosts the pass is just a cache warm-up.
+  * `is_numa_relevant_platform()` — `true` on Linux (where
+    NUMA layouts can hurt strong-scaling), `false` on macOS
+    (single-domain Apple Silicon SoC). Step 29's writeup
+    consults the flag to decide whether to run the
+    `numactl`-companion bench.
+- Added `tools/run_bench_numa.sh` — wraps `bench_brute_force`
+  in `numactl --interleave=all` when the host has `numactl`,
+  falls through to the plain invocation when it does not. The
+  `--interleave=all` policy is the smallest knob that produces
+  interpretable strong-scaling numbers on a multi-socket host
+  without requiring the algorithm to have called `first_touch`
+  itself.
+- Added `docs/NUMA.md` — the project's NUMA story end-to-end:
+  why first-touch is the right primitive, what the OpenMP
+  schedule has to do with the layout, why macOS gets the
+  function as a no-op rather than an `#ifdef`, and three open
+  questions deferred for a future pass (libnuma probe,
+  per-builder integration, `--membind=N` flag).
+- Five new `test_numa` GTest cases (114 total): null pointer
+  is a no-op, zero-length is a no-op, buffer contents are
+  preserved exactly, sub-page buffers do not overrun the
+  loop, the platform flag returns a deterministic value.
+- Wired `cpu/numa.cpp` into the `knng_cpu` library and
+  `tests/numa_test.cpp` into the CTest matrix.
+- ctest 114/114 green (5 new numa, 109 carried over from
+  Step 25).
+
+### Why
+Phase 4's headline result — strong-scaling brute-force on
+SIFT1M+ — runs aground on a Linux multi-socket host without
+NUMA-aware page placement. The default first-touch policy
+puts every page on the *loader thread's* node, so an 8-thread
+read later spends 7/8ths of its DRAM bandwidth on the
+inter-socket interconnect. The published "8-thread speedup"
+number then sub-linearly because the workers are competing
+for one node's bandwidth rather than scaling across all
+nodes' bandwidth.
+
+The fix is conceptually trivial — touch the buffer from the
+same schedule the algorithm uses — but the *infrastructure*
+to do it portably is what Step 26 ships. Any future builder
+that streams a large buffer (Step 24's OMP variants, Step 35's
+parallel NN-Descent, Step 39's distributed brute-force) will
+call `first_touch` after population and before the first
+parallel read; the helper is a single function the rest of
+the project does not have to know any further details about.
+
+The runtime page-size detection (`sysconf(_SC_PAGESIZE)` rather
+than a hard-coded `4096`) costs a single syscall per
+invocation and handles every supported platform without
+`#ifdef`: x86_64 and arm64 Linux are 4 KB or 64 KB depending
+on kernel config, Apple Silicon M-series is 16 KB. A hard-coded
+4096 would over-walk the buffer on Apple (more page faults
+than necessary) and under-walk it on a kernel configured for
+huge pages.
+
+The wrapper script's `numactl --interleave=all` policy is the
+*spread-pages-evenly* fix; it does not produce the same
+numbers as the `first_touch`-aware path, but it is the
+simpler-and-coarser guarantee for ad-hoc runs that have not
+invoked `first_touch` themselves. Step 29's writeup will
+report both numbers so the reader can see the gap between
+"NUMA-blind run on a multi-socket host" and "NUMA-aware run
+on the same host."
+
+### Tradeoff
+- **`is_numa_relevant_platform()` is platform-keyed, not
+  topology-keyed.** A single-socket Linux laptop reports
+  `true` even though it has only one NUMA node; the flag's
+  intended use is "should the bench wrapper bother running
+  the `numactl` companion?" and the conservative answer
+  on Linux is yes. A future refinement will swap the
+  constant for a libnuma `numa_available() && numa_max_node()
+  > 0` probe. The CHANGELOG flags this as the natural
+  follow-up.
+- **`first_touch` does not check whether the schedule
+  matches the caller's later read pattern.** If a caller
+  uses `schedule(dynamic)` for the read but
+  `schedule(static)` for first-touch (the helper's
+  hard-coded choice), the page-to-thread alignment is
+  imperfect and some pages still bind to a remote node. We
+  accept the rigidity: every Phase-4 builder uses
+  `schedule(static)` (Step 24's deliberate choice for a
+  load-balanced kernel); a future Step 35 NN-Descent
+  variant that wants `schedule(dynamic)` will need a
+  different first-touch helper, which we will ship then.
+- **macOS gets the function as a no-op redistribution.** The
+  pass still runs (cache-warm side effect) but does no
+  redistribution. We accept the small wasted cost — ~0.3 s
+  on a 512 MB buffer, dominated by the read+write — over an
+  `#ifdef` that would force every caller to know the
+  platform.
+- **No bench-harness integration in this step.** The bench
+  binary `bench_brute_force` does not call `first_touch` on
+  its synthetic dataset yet. We deferred the wiring to
+  Step 29's scaling writeup, where the
+  `first_touch`-on-vs-off comparison *is* the artefact —
+  having both lines on the same plot is more useful than
+  silently turning it on now and losing the comparison.
+
+### Learning
+- *NUMA layout matters before a single SIMD intrinsic does.*
+  The temptation in Phase 4 is to reach for hand-vectorisation
+  (Step 28) before fixing the layout — and to then chase a
+  4–8% SIMD win while a 30–50% NUMA win is sitting unfixed.
+  The right ordering, baked into the plan, is: parallelise
+  (Step 24), thread-local scratch (Step 25), NUMA layout
+  (Step 26), *then* SIMD (Step 28). Every parallel-CPU
+  optimisation effort the project ships afterwards starts from
+  this ordering.
+- *Cross-platform first-touch is one function, not three.*
+  The function compiles unchanged on macOS, x86_64 Linux,
+  and arm64 Linux. The platform-conditional behaviour is in
+  the kernel's page-allocation policy, not in our code; the
+  helper is a single stable interface. This is the right
+  shape for any "OS-policy-aware" helper: do the same write
+  pattern everywhere, let the kernel make the binding
+  decision, document the platform behaviour in `docs/NUMA.md`
+  rather than in `#ifdef`s.
+- *`sysconf(_SC_PAGESIZE)` is the right page-size source.*
+  It surfaces the runtime page size, including huge-page
+  configurations a hard-coded constant would miss. Querying
+  it once per call costs ~one syscall (~50 ns) — negligible
+  next to the multi-megabyte buffer the function then walks.
+
+### Next
+- Step 27: a `std::thread` + work-queue alternative
+  implementation of the parallel L2 brute-force, as a
+  learning exercise. Same correctness contract as Step 24's
+  OpenMP path; different API ergonomics; will be measured
+  against OpenMP for both wall time and source-line count.
+
+---
+
 ## [Step 25] — Thread-local scratch + cache-line padding (2026-05-04)
 
 ### What

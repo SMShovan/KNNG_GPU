@@ -19,6 +19,7 @@ set(_knng_cpu_sources
     cpu/brute_force.cpp
     cpu/brute_force_omp.cpp
     cpu/distance.cpp
+    cpu/numa.cpp
 )
 if(KNNG_HAVE_BLAS)
     list(APPEND _knng_cpu_sources cpu/brute_force_blas.cpp)

@@ -179,3 +179,24 @@ gtest_discover_tests(test_random
         LABELS "random"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_numa` exercises the cross-platform first-touch helper
+# (Step 26): no-op on null/zero, contents preserved, sub-page
+# buffer tolerated, platform flag returns a stable value.
+add_executable(test_numa numa_test.cpp)
+target_link_libraries(test_numa
+    PRIVATE
+        knng::cpu
+        GTest::gtest_main
+)
+knng_set_warnings(test_numa)
+
+set_target_properties(test_numa PROPERTIES
+    OUTPUT_NAME "test_numa"
+)
+
+gtest_discover_tests(test_numa
+    PROPERTIES
+        LABELS "numa"
+    DISCOVERY_TIMEOUT 10
+)

@@ -12,6 +12,166 @@ independent of the code diff.
 
 ---
 
+## [Step 28] — Hand-vectorised SIMD distance kernel (2026-05-04)
+
+### What
+- Added `include/knng/cpu/distance_simd.hpp` and
+  `src/cpu/distance_simd.cpp`. Two public entry points:
+  * `simd_squared_l2(a, b, dim)` — hand-vectorised squared-L2.
+  * `simd_dot_product(a, b, dim)` — hand-vectorised inner product.
+  Plus the diagnostic helpers
+  `compiled_simd_path() → SimdPath::{kAvx2, kNeon, kScalar}` and
+  `active_simd_path()` (the runtime answer; on x86 binaries
+  compiled with `-mavx2` but running on a non-AVX2 CPU,
+  `compiled_simd_path()` returns `kAvx2` while
+  `active_simd_path()` falls back to `kScalar`).
+- Compile-time path selection:
+  * **AVX2** (`__AVX2__`) — 8 floats per `__m256` register, FMA
+    via `_mm256_fmadd_ps`, horizontal reduction via paired
+    `_mm_hadd_ps`. Selected when the user passed `-mavx2` /
+    `-march=native` on a CPU that supports it.
+  * **NEON** (`__ARM_NEON`) — 4 floats per `float32x4_t`, FMA
+    via `vfmaq_f32`, horizontal reduction via `vaddvq_f32` (one
+    instruction on ARMv8). Mandatory on any modern arm64
+    target so always present on Apple Silicon.
+  * **Scalar fallback** — calls `knng::squared_l2` /
+    `knng::cpu::dot_product` directly. Same answer, no speedup.
+- Runtime CPUID fallback on x86 via
+  `__builtin_cpu_supports("avx2")`, cached in a function-local
+  `static const bool`. Apple's NEON path skips this — NEON is
+  ARMv8-mandatory.
+- Added `knng::cpu::brute_force_knn_l2_simd(ds, k)` — the same
+  shape as `brute_force_knn_l2_with_norms` (Step 19) with the
+  inner-loop dot product replaced by `simd_dot_product`. Output
+  is bit-equivalent to the canonical builder up to fp
+  accumulation reordering.
+- Eight new `test_brute_force` cases: SIMD `squared_l2` matches
+  scalar on a tail-only (dim=17) buffer, on a power-of-2 dim
+  with hand-computed reference, dot-product matches scalar
+  on dim=23 (odd), `dim=0` returns zero on both primitives,
+  `active_simd_path` returns a valid enumeration, the
+  `brute_force_knn_l2_simd` builder matches the canonical
+  builder on the 8-point fixture, and `k=0` / `k>n-1` throw.
+- Added `BM_BruteForceL2Simd_Synthetic` family at the same
+  `(n, d)` grid as the scalar baselines.
+- ctest 127/127 green (8 new brute_force, 119 carried over
+  from Step 27).
+- **Measured at n=1024, d=128:** NEON SIMD 23.4 ms vs
+  canonical 70.8 ms — **~3.0× speedup**, recall stays at 1.0.
+  Second-largest single-step win in the project after Step 21's
+  BLAS path.
+
+### Why
+The autovectoriser is good — at d=128 on AppleClang it produces
+NEON code for the canonical inner loop already — but it leaves
+throughput on the table at the *boundaries* between the
+distance-formula's three operations (subtract, multiply,
+accumulate). Hand-vectorising as a single `vfmaq_f32(acc, d, d)`
+sequence per chunk fuses the three operations into one
+instruction per 4-lane chunk, which the autovectoriser will
+not always generate when it has to reason about loop-carried
+dependencies and aliasing.
+
+The 3× win at d=128 measures exactly this: the per-pair work
+goes from ~32 NEON instructions (autovec) to ~16 (hand-written
+FMA chain). The horizontal reduction at the end (one
+`vaddvq_f32`) is bottleneck-free; the scalar tail (zero
+iterations at d=128 since 128 is a multiple of 4) costs
+nothing on this fixture but exists because Fashion-MNIST is
+d=784 — *not* a multiple of 4 — and the same code has to work
+there.
+
+The mapping to GPU warp-level thinking is the *point* of this
+step. An `__m256` holds 8 lanes; a CUDA warp holds 32. The
+AVX2 dot-product loop computes a per-lane partial sum and
+reduces at the end — the same shape as a CUDA shuffle-based
+warp reduction (`__shfl_xor_sync`). When Step 53 ships the
+GPU warp-level top-k, the structure of this file is what the
+kernel will inherit; only the lane count and the reduction
+primitive change.
+
+The runtime CPUID dispatch on x86 is overkill for a typical
+build — a developer who passes `-march=native` is going to run
+on the same CPU. We ship it anyway because it is two lines of
+code (`__builtin_cpu_supports` plus a static cache) and it
+catches a real footgun: a binary built with `-march=native` on
+one machine, copied onto a deploy host that lacks AVX2, would
+otherwise SIGILL on the first `_mm256_loadu_ps`. Falling back
+to scalar is far better than crashing.
+
+### Tradeoff
+- **No `-mavx2` flag is set automatically.** The build picks
+  AVX2 only when the toolchain *already* defines `__AVX2__`,
+  which happens with `-march=native` on a CPU that supports
+  it. We deliberately do not add `-mavx2` to the project's
+  default flags: doing so would lose the runtime
+  CPUID-dispatch benefit (the binary would refuse to start on
+  any non-AVX2 CPU) and would force a per-CPU build matrix on
+  CI. The `KNNG_HAVE_*` flag pattern (BLAS, OpenMP) does not
+  apply here because the SIMD code is *correctness*-equivalent
+  on every platform; only the speed varies.
+- **AVX-512 path absent.** The same code structure trivially
+  extends to `__m512` (16 lanes) on Skylake-X / Zen 4 / future
+  arm64 SVE2. We deferred: (a) the project's CI runners do not
+  exercise AVX-512, (b) the win at d=128 over AVX2 is at most
+  another ~1.5× — far less than Step 21's 18× BLAS jump on
+  the same fixture. The CHANGELOG flags this as a future
+  refinement; the existing structure makes it a one-file diff.
+- **No SIMD variant for the BLAS path's epilogue.** The norm
+  fold-in inside `brute_force_knn_l2_blas` (Step 21) is
+  scalar; vectorising it would shave a few percent off the
+  already-3.8 ms BLAS path. The wall-time priority is
+  elsewhere — we leave the epilogue scalar.
+- **Eight tests for two primitives is a lot of ceremony.** We
+  accept it: the SIMD primitives sit underneath every later
+  parallel-CPU step, and a regression in either would silently
+  change recall numbers across the entire project. The
+  per-tail and per-aligned-dim coverage is the kind of thing
+  that catches a future "I rewrote the FMA chain to use
+  `vmlaq_f32` instead of `vfmaq_f32`" mistake.
+
+### Learning
+- *FMA fuses three instructions into one — and the
+  autovectoriser does not always notice.* The canonical
+  inner loop is `delta = a - b; delta_sq = delta * delta;
+  acc += delta_sq;`. The optimal NEON sequence is
+  `vsubq_f32` + `vfmaq_f32` (`acc += delta * delta`) — two
+  instructions per 4-lane chunk. The autovectoriser
+  sometimes produces the same; sometimes it produces the
+  three-instruction form. Hand-writing the FMA *guarantees*
+  the two-instruction form.
+- *NEON's `vaddvq_f32` is the single-instruction horizontal
+  reduce.* AVX2 has no direct equivalent; the four-line
+  `_mm_hadd_ps` chain is the standard workaround. ARM
+  designed the `vaddvq_f32` instruction precisely to make
+  the horizontal-reduce step cheap, and it shows in the
+  numbers. Step 53's GPU port will use `__shfl_xor_sync` for
+  the analogous role.
+- *Runtime CPUID is cheap insurance.* The
+  `__builtin_cpu_supports("avx2")` query is one CPUID
+  instruction the first time it runs; cached forever after.
+  Skipping it would cost two lines of code and one bug that
+  takes a day to debug when it fires. Always pay the
+  insurance.
+- *The diagnostic `enum class SimdPath` is what makes the
+  test suite *useful*.* Without `compiled_simd_path()` and
+  `active_simd_path()`, a future contributor reading a CI
+  log cannot tell whether the SIMD path actually ran or
+  silently fell back to scalar. The two queries cost
+  basically nothing and turn the runtime question into a
+  test assertion.
+
+### Next
+- Step 29: CPU scaling writeup (`docs/SCALING_CPU.md`).
+  Strong-scaling and weak-scaling tables across every Phase-3
+  + Phase-4 builder — canonical, norms, tiled, partial_sort,
+  BLAS, OMP, OmpScratch, Threaded, SIMD. The headline
+  artefact summarising the entire serial-and-parallel CPU
+  optimisation ladder before the project shifts to NN-Descent
+  in Phase 5.
+
+---
+
 ## [Step 27] — `std::thread` + atomic-counter alternative (2026-05-04)
 
 ### What

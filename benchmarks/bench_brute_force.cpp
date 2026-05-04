@@ -284,6 +284,35 @@ BENCHMARK(BM_BruteForceL2Threaded_Synthetic)
     ->ArgsProduct({{1024}, {128}, {1, 2, 4, 8}})
     ->Unit(benchmark::kMillisecond);
 
+/// Step-28 SIMD variant. Same algorithmic shape as the norms path;
+/// the per-pair dot product is replaced with the hand-vectorised
+/// `knng::cpu::simd_dot_product` (AVX2 → NEON → scalar fallback).
+void BM_BruteForceL2Simd_Synthetic(benchmark::State& state)
+{
+    const std::size_t n = static_cast<std::size_t>(state.range(0));
+    const std::size_t d = static_cast<std::size_t>(state.range(1));
+    constexpr std::size_t k = 10;
+    constexpr std::uint64_t seed = 42;
+
+    const knng::Dataset ds = make_synthetic(n, d, seed);
+
+    const knng::Knng truth = knng::cpu::brute_force_knn(
+        ds, k, knng::L2Squared{});
+    knng::Knng last;
+
+    for (auto _ : state) {
+        last = knng::cpu::brute_force_knn_l2_simd(ds, k);
+        benchmark::DoNotOptimize(last);
+        benchmark::ClobberMemory();
+    }
+
+    const double recall = knng::bench::recall_at_k(last, truth);
+    annotate(state, n, d, k, recall);
+}
+BENCHMARK(BM_BruteForceL2Simd_Synthetic)
+    ->ArgsProduct({{256, 512, 1024}, {32, 128}})
+    ->Unit(benchmark::kMillisecond);
+
 /// Step-22 partial-sort variant. Same arithmetic as the norms
 /// path; replaces the streaming `TopK` heap with `std::partial_sort`
 /// over the full per-query candidate buffer.

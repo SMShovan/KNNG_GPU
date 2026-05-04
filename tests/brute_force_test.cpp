@@ -19,6 +19,8 @@
 #include "knng/core/graph.hpp"
 #include "knng/core/types.hpp"
 #include "knng/cpu/brute_force.hpp"
+#include "knng/cpu/distance.hpp"
+#include "knng/cpu/distance_simd.hpp"
 
 namespace {
 
@@ -337,6 +339,107 @@ TEST(BruteForceKnnL2Tiled, KGreaterThanNMinusOneThrowsInvalidArgument)
     const auto ds = two_clusters_eight_points();
     EXPECT_THROW(
         { (void)knng::cpu::brute_force_knn_l2_tiled(ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------
+// Step 28: brute_force_knn_l2_simd + simd_squared_l2 / simd_dot_product
+// — hand-vectorised primitives. Vectorised path must agree with the
+// scalar path within fp accumulation tolerance.
+// ---------------------------------------------------------------------
+
+TEST(SimdPrimitive, SquaredL2MatchesScalarOnSmallVectors)
+{
+    constexpr std::size_t dim = 17;  // not a multiple of 4 or 8 — exercises the tail
+    std::array<float, dim> a{};
+    std::array<float, dim> b{};
+    for (std::size_t i = 0; i < dim; ++i) {
+        a[i] = static_cast<float>(i + 1) * 0.5f;
+        b[i] = static_cast<float>(i * 3 + 2) * 0.25f;
+    }
+    const float scalar = knng::squared_l2(a.data(), b.data(), dim);
+    const float simd   = knng::cpu::simd_squared_l2(
+        a.data(), b.data(), dim);
+    EXPECT_NEAR(scalar, simd, 1e-3f);
+}
+
+TEST(SimdPrimitive, SquaredL2HandlesPowerOf2Dim)
+{
+    // dim = 16 is a multiple of both 4 and 8 — no tail.
+    constexpr std::size_t dim = 16;
+    std::array<float, dim> a{};
+    std::array<float, dim> b{};
+    for (std::size_t i = 0; i < dim; ++i) {
+        a[i] = static_cast<float>(i + 1);
+        b[i] = -static_cast<float>(i + 1);
+    }
+    // ||a-b||² = Σ(2*(i+1))² = 4 * Σ(i+1)² for i in [0,16) = 4 * 1496 = 5984
+    EXPECT_NEAR(knng::cpu::simd_squared_l2(a.data(), b.data(), dim),
+                5984.0f, 1e-3f);
+}
+
+TEST(SimdPrimitive, DotProductMatchesScalar)
+{
+    constexpr std::size_t dim = 23;  // odd, exercises tail on both ISAs
+    std::array<float, dim> a{};
+    std::array<float, dim> b{};
+    for (std::size_t i = 0; i < dim; ++i) {
+        a[i] = static_cast<float>(i + 1) * 0.1f;
+        b[i] = static_cast<float>(i * 2 + 3) * 0.05f;
+    }
+    const float scalar = knng::cpu::dot_product(a.data(), b.data(), dim);
+    const float simd   = knng::cpu::simd_dot_product(
+        a.data(), b.data(), dim);
+    EXPECT_NEAR(scalar, simd, 1e-4f);
+}
+
+TEST(SimdPrimitive, ZeroDimReturnsZero)
+{
+    EXPECT_FLOAT_EQ(knng::cpu::simd_squared_l2(nullptr, nullptr, 0),
+                    0.0f);
+    EXPECT_FLOAT_EQ(knng::cpu::simd_dot_product(nullptr, nullptr, 0),
+                    0.0f);
+}
+
+TEST(SimdPrimitive, ActivePathReturnsAValidEnumeration)
+{
+    [[maybe_unused]] const auto p = knng::cpu::active_simd_path();
+    EXPECT_TRUE(p == knng::cpu::SimdPath::kAvx2 ||
+                p == knng::cpu::SimdPath::kNeon ||
+                p == knng::cpu::SimdPath::kScalar);
+}
+
+// brute_force_knn_l2_simd — high-level builder using the SIMD primitive.
+
+TEST(BruteForceKnnL2Simd, MatchesCanonicalNeighborsAndDistances)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto simd = knng::cpu::brute_force_knn_l2_simd(
+        ds, std::size_t{3});
+
+    EXPECT_EQ(baseline.neighbors, simd.neighbors);
+    for (std::size_t i = 0; i < baseline.distances.size(); ++i) {
+        EXPECT_NEAR(baseline.distances[i], simd.distances[i], 1e-3f);
+    }
+}
+
+TEST(BruteForceKnnL2Simd, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_simd(
+            ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Simd, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_simd(
+            ds, std::size_t{8}); },
         std::invalid_argument);
 }
 

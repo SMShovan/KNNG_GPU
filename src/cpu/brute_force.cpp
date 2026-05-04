@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "knng/cpu/distance.hpp"
+#include "knng/cpu/distance_simd.hpp"
 
 namespace knng::cpu {
 
@@ -124,6 +125,61 @@ Knng brute_force_knn_l2_tiled(const Dataset& ds,
         }
     }
 
+    return out;
+}
+
+Knng brute_force_knn_l2_simd(const Dataset& ds, std::size_t k)
+{
+    if (ds.n == 0) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_simd: dataset is empty");
+    }
+    if (k == 0) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_simd: k must be > 0");
+    }
+    if (k > ds.n - 1) {
+        throw std::invalid_argument(
+            "knng::cpu::brute_force_knn_l2_simd: k ("
+            + std::to_string(k) + ") must be <= ds.n - 1 ("
+            + std::to_string(ds.n - 1) + ")");
+    }
+    assert(ds.is_contiguous());
+
+    std::vector<float> norms;
+    compute_norms_squared(ds, norms);
+
+    const float*      base   = ds.data_ptr();
+    const std::size_t stride = ds.stride();
+
+    Knng out(ds.n, k);
+    for (std::size_t q = 0; q < ds.n; ++q) {
+        TopK heap(k);
+        const float* a       = base + q * stride;
+        const float  norm_a  = norms[q];
+
+        for (std::size_t r = 0; r < ds.n; ++r) {
+            if (r == q) {
+                continue;
+            }
+            const float* b      = base + r * stride;
+            const float  norm_b = norms[r];
+            float dist =
+                norm_a + norm_b - 2.0f * simd_dot_product(a, b, stride);
+            if (dist < 0.0f) {
+                dist = 0.0f;
+            }
+            heap.push(static_cast<index_t>(r), dist);
+        }
+
+        const auto sorted = heap.extract_sorted();
+        auto neighbors_row = out.neighbors_of(q);
+        auto distances_row = out.distances_of(q);
+        for (std::size_t j = 0; j < sorted.size(); ++j) {
+            neighbors_row[j] = sorted[j].first;
+            distances_row[j] = sorted[j].second;
+        }
+    }
     return out;
 }
 

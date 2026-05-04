@@ -297,6 +297,24 @@ inline constexpr bool kHasOpenmpBuiltin =
     std::size_t k,
     int num_threads = 0);
 
+/// L2 brute-force builder using the hand-vectorised dot-product
+/// primitive (`simd_dot_product`).
+///
+/// Same algorithmic shape as `brute_force_knn_l2_with_norms`
+/// (Step 19): same precomputed norms, same algebraic identity,
+/// same `TopK` heap. The only structural change is the inner-loop
+/// dot product is replaced with `knng::cpu::simd_dot_product`,
+/// which compile-time picks the AVX2 / NEON / scalar path
+/// available on the build target and runtime-degrades to scalar
+/// on x86 binaries running on a non-AVX2 CPU.
+///
+/// Output is bit-equivalent (within fp accumulation reordering)
+/// to the canonical L2 builder. The win shows up at large `d`
+/// where the per-pair dot product dominates the inner loop and
+/// the compiler's autovectoriser leaves throughput on the table.
+[[nodiscard]] Knng brute_force_knn_l2_simd(const Dataset& ds,
+                                           std::size_t k);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

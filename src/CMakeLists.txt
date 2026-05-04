@@ -20,6 +20,7 @@ set(_knng_cpu_sources
     cpu/brute_force_omp.cpp
     cpu/brute_force_threads.cpp
     cpu/distance.cpp
+    cpu/distance_simd.cpp
     cpu/numa.cpp
 )
 if(KNNG_HAVE_BLAS)

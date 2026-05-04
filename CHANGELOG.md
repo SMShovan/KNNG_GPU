@@ -12,6 +12,142 @@ independent of the code diff.
 
 ---
 
+## [Step 29] — CPU scaling writeup (2026-05-04)
+
+### What
+- Added `docs/SCALING_CPU.md` — the headline artefact for
+  Phases 3 and 4. Two tables on a single page:
+  * **Single-threaded ladder** — every Phase-3 + Phase-4 builder
+    at `n=1024, d=128, k=10`, sorted by speedup vs the canonical
+    Step-10 baseline. Five rows: canonical (71.26 ms),
+    norms (66.41 ms / 1.07×), partial_sort (62.99 ms / 1.13×),
+    SIMD/NEON (23.46 ms / **3.04×**), BLAS/Accelerate
+    (4.00 ms / **17.82×**).
+  * **Strong-scaling sweep** — three parallel implementations
+    (OMP plain, OMP-with-scratch, std::thread) across
+    `threads ∈ {1, 2, 4, 8}` at the same `(n, d, k)`. The
+    three implementations land within 5% of each other at
+    every thread count; ~7× at 8 threads on Apple M-series
+    (P-core + E-core mix).
+- Added `docs/aggregate_phase4.py` — a 70-line, dependency-free
+  Python script that ingests `bench_brute_force --benchmark_format=json`
+  output and prints both tables to stdout. Field names mirror
+  the C++ counter set (`recall_at_k`, `threads`); the script's
+  `_PARALLEL_FAMILIES` tuple is the single edit point if a future
+  step adds another parallel builder.
+- Captured the six take-aways the writeup commits to: two big
+  wins + three small ones in the ladder; near-linear strong
+  scaling up to 8 threads; OpenMP and `std::thread` are
+  source-line decisions not perf decisions; recall stays at
+  `1.0` across every cell of every table; the unrealised win
+  is OMP × SIMD × BLAS stacking which Phase 5 will need.
+- Five open questions deferred for the next pass:
+  `-march=native` rerun on the same host, Linux + GCC +
+  OpenBLAS comparison, weak-scaling table, NUMA first-touch
+  on/off comparison at SIFT1M scale, OMP × SIMD × BLAS
+  composability.
+- ctest 127/127 green; this step adds documentation only.
+
+### Why
+Phases 3 and 4 produced nine new builders between them (norms,
+tiled, partial_sort, BLAS, OMP, OmpScratch, Threaded, SIMD,
+plus the ground-truth builder). Each has its own CHANGELOG
+entry; without a single page that puts every wall-time number
+in one table, the project's pedagogical narrative gets lost
+in the noise. `docs/SCALING_CPU.md` is the page a reader can
+jump to, see the entire ladder, and understand "what did
+parallel and serial CPU optimisation actually buy us?" without
+spelunking through nine commit messages.
+
+The structure (`Setup · Single-threaded ladder ·
+Strong-scaling sweep · Take-aways · Methodology · Open
+questions · Reproduction commands`) extends Step 23's
+`PERF_STEP23.md` template to include a *parallel* table.
+Every later writeup
+(`docs/PERF_SINGLE_GPU.md`, `docs/MULTI_GPU.md`,
+`docs/DISTRIBUTED_GPU.md`) will inherit the same shape with
+an extra "compute resource" axis substituted for "threads"
+(GPUs, nodes, ranks).
+
+`aggregate_phase4.py` exists for the same reason
+`tools/plot_bench.py` exists: the C++ build produces the JSON,
+the Python script renders the human-readable summary, and the
+two are kept in sync by name conventions
+(`F_NAME`, `F_TIME`, `F_RECALL`, `F_THREADS`) at the top of
+the Python file. Renaming a counter in the C++ side becomes a
+two-edit change.
+
+The "OMP × SIMD × BLAS stacking" take-away is the most
+important Phase-4 close-out: as shipped, the three parallelism
+axes are *orthogonal* but not *composable*. The OMP path uses
+the scalar dot product (no SIMD); the SIMD path is single-
+threaded; the BLAS path is single-threaded but Accelerate is
+internally multi-threaded above some `n` threshold. Phase 5's
+NN-Descent needs OMP × SIMD; the multi-GPU phases need OMP +
+SIMD + GPU coordination. Pinning the unrealised composability
+in this writeup is what gives a future contributor the right
+context for the question "should I add OpenMP to the SIMD
+path?" (answer: yes, when Phase 5 needs it).
+
+### Tradeoff
+- **Numbers are AppleClang on M-series only.** The same
+  caveat as Step 23's writeup; explicit in the
+  "Open questions" section. A Linux + GCC + OpenBLAS rerun
+  is the natural Phase-5-precondition follow-up.
+- **No NUMA first-touch row in the table.** Step 26 ships
+  `knng::cpu::first_touch` but the bench harness does not
+  call it. We keep the omission visible in "Open questions"
+  rather than silently turning it on (which would muddy the
+  baseline numbers) or rolling a separate
+  `BM_BruteForceL2OmpScratchFirstTouch_Synthetic` family
+  (which would balloon the bench grid).
+- **The `aggregate_phase4.py` heuristic is a hard-coded
+  list of parallel-family prefixes.** If a future step
+  adds a parallel builder with a different naming
+  convention, the script reports it under the
+  single-threaded section. The mitigation is the
+  `_PARALLEL_FAMILIES` tuple at the top of the file —
+  visible, easy to grow.
+- **`aggregate_phase4.py` is `phase4`-named, not
+  generic.** A future Phase-7 GPU writeup will want a
+  similar aggregator; we will copy this one and edit the
+  family list rather than parameterising. Two scripts at
+  100 lines each beat one parameterised script at 200.
+
+### Learning
+- *The right time to ship a writeup is the moment the data
+  is ambient.* By the end of Step 28 the bench harness can
+  produce all the numbers in one run; waiting until Phase 5
+  to write the Phase-4 writeup would mean the numbers no
+  longer match the head of `main`. Pinning the artefact
+  *now*, with the bench JSON and the aggregator script
+  committed alongside, is what makes "reproduction six
+  months from now" a realistic claim.
+- *Two tables are enough; three is too many.* The first
+  draft of this writeup had four tables (single-threaded,
+  strong-scaling, weak-scaling, NUMA-comparison). The
+  weak-scaling and NUMA tables would have been mostly
+  empty for the reasons in "Open questions." A short
+  writeup with two complete tables is more useful than a
+  long writeup with two complete and two empty ones.
+- *Family-naming convention is load-bearing.* The
+  aggregator's heuristic for "is this row a parallel
+  builder?" is `name.startswith(prefix)` where the
+  prefixes are the bench-family names. Step 24's choice
+  of `BM_BruteForceL2Omp_Synthetic` (rather than
+  `BM_BruteForceL2_Synthetic_OMP`) made this trivial.
+  Future bench families should follow the same pattern.
+
+### Next
+- Phase 5 (Step 30): random-graph initialisation as the
+  first NN-Descent step. The brute-force chapter closes
+  here; from Step 30 onwards the project moves to
+  approximate algorithms where `recall_at_k` is no longer
+  trivially 1.0 and the speed-vs-quality Pareto plots
+  start mattering.
+
+---
+
 ## [Step 28] — Hand-vectorised SIMD distance kernel (2026-05-04)
 
 ### What

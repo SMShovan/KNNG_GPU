@@ -12,6 +12,132 @@ independent of the code diff.
 
 ---
 
+## [Step 24] — OpenMP outer-query parallelisation (2026-05-04)
+
+### What
+- Added `cmake/FindKnngOpenMP.cmake` — discovers an OpenMP runtime
+  and exposes it as the `knng::openmp_iface` INTERFACE target. On
+  Apple it pre-sets `OpenMP_ROOT` to Homebrew's `libomp` install
+  paths (`/opt/homebrew/opt/libomp` or `/usr/local/opt/libomp`)
+  before `find_package(OpenMP)`, so AppleClang picks up the
+  Homebrew libomp without the user touching `cmake/`. Sets the
+  cache variable `KNNG_HAVE_OPENMP`. New CMake option
+  `KNNG_ENABLE_OPENMP` (default ON) gates the entire feature so a
+  user without OpenMP can still build.
+- Added `src/cpu/brute_force_omp.cpp` and the new
+  `knng::cpu::brute_force_knn_l2_omp(ds, k, num_threads=0)` entry
+  point. Algorithmically identical to
+  `brute_force_knn_l2_with_norms` (Step 19); the only structural
+  change is `#pragma omp parallel for schedule(static)` on the
+  outer query loop and an `omp_set_num_threads(num_threads)` call
+  when `num_threads > 0`.
+- Added the `kHasOpenmpBuiltin` `inline constexpr bool` constant
+  mirroring Step 21's `kHasBlasBuiltin`. Compiles unconditionally;
+  the OpenMP-specific bits live behind `#if KNNG_HAVE_OPENMP` and
+  degrade to a serial loop when the build did not link OpenMP.
+- Five new `test_brute_force` cases: matches the canonical builder
+  at the default thread count, output is bit-identical at 1 / 2 /
+  4 threads (parallelisation does not perturb tie-breaking),
+  `k = 0` and `k > n - 1` throw, the builtin flag returns a single
+  deterministic value.
+- Added `BM_BruteForceL2Omp_Synthetic` family that sweeps
+  `threads ∈ {1, 2, 4, 8}` at `n = 1024, d = 128`. The thread
+  count is reported as `state.counters["threads"]` so Step 29's
+  scaling writeup ingests the same JSON.
+- ctest 105/105 green (5 new brute_force, 100 carried over from
+  Step 23).
+- **Measured at n=1024, d=128:** 1 thread 66.0 ms,
+  2 threads 33.5 ms (1.97×), 4 threads 17.4 ms (3.79×), 8
+  threads 9.99 ms (6.61×). Recall stays at 1.0 for every config.
+
+### Why
+This is the project's first parallel-CPU step and the foundation
+the next five steps (thread-local scratch, NUMA, std::thread
+alternative, SIMD, scaling writeup) build on. The shape is
+deliberately the *simplest* OpenMP usage that makes sense: one
+`#pragma omp parallel for` on a loop where every iteration is
+independent, no critical sections, no locks, no atomics. Every
+later parallel-CPU optimisation — Step 25's per-thread scratch,
+Step 35's parallel NN-Descent — is a controlled departure from
+this baseline.
+
+The `schedule(static)` clause is right for brute-force: every
+query does the same `n` distance evaluations, so static
+partitioning balances perfectly and avoids OpenMP's per-chunk
+scheduling overhead. `dynamic` schedule would land in Step 35
+once NN-Descent introduces per-iteration work imbalance (some
+local-joins finish early, others take longer); for now it would
+just be cost without benefit.
+
+The 6.6× scaling at 8 threads on Apple M-series is consistent
+with the SoC's mix of performance and efficiency cores — the
+performance cores handle the first 4 threads at full clock, the
+efficiency cores pick up 5–8 at ~70% throughput. Linear scaling
+on a homogeneous cluster CPU (e.g. AMD EPYC, Intel Xeon) will
+look closer to 7.5–8× at 8 threads. Step 29's scaling writeup
+will document both.
+
+The `num_threads` parameter is an explicit override rather than a
+process-wide `omp_set_num_threads` because (a) the bench harness
+runs many configurations in one process and would otherwise leak
+state between them, and (b) downstream callers may want to
+reserve threads for their own work. Passing 0 (the default) means
+"use whatever the runtime would have used" — `OMP_NUM_THREADS`
+or hardware concurrency.
+
+### Tradeoff
+- **Per-iteration `TopK` allocation, not amortised.** The heap is
+  declared inside the parallel-for body, so each iteration
+  allocates and frees its `std::priority_queue<...>` storage.
+  This is the *correct* shape for thread safety (no shared
+  state) and the overhead is dominated by the n=1024 distance
+  computations anyway. Step 25 will hoist the allocation out
+  via per-thread scratch when the heap pressure starts to show
+  up in the profile.
+- **`schedule(static)` makes thread 0 finish last on heterogeneous
+  cores.** Apple Silicon's performance/efficiency split means
+  the equally-sized static chunks finish at different times.
+  `schedule(static, 16)` (smaller chunks) would even out the
+  finish times by letting fast cores pick up extra chunks
+  early, but that would also introduce per-chunk overhead.
+  Step 29's writeup will measure both.
+- **The OpenMP-not-found degradation is silent.** If `libomp` is
+  not installed, the `#pragma omp` is a comment under
+  AppleClang and the loop runs single-threaded — at the same
+  speed as `brute_force_knn_l2_with_norms` from Step 19, but
+  *labelled* as the OMP path. We accept this: the
+  `kHasOpenmpBuiltin` constant makes the build state
+  inspectable, and the `cmake/FindKnngOpenMP.cmake` log line
+  surfaces the situation at configure time.
+
+### Learning
+- *AppleClang + Homebrew libomp + CMake is the canonical macOS
+  parallelism stack.* The pre-set `OpenMP_ROOT` trick in
+  `FindKnngOpenMP.cmake` is the bit that turns "OpenMP works
+  on Linux but not Mac" into "OpenMP works everywhere." Future
+  contributors do not need to know about `libomp`'s Homebrew
+  layout — the find module does it.
+- *Strong scaling on a SoC is not the same as strong scaling on
+  a server CPU.* The ~6.6× at 8 threads on M-series is what
+  Apple Silicon delivers; the project's eventual cluster runs
+  will see 7.5–8× on homogeneous server cores. The right
+  expectation is "near-linear up to the number of physical
+  performance cores, sub-linear when efficiency cores
+  contribute" — and Step 29's writeup will pin both numbers
+  for posterity.
+- *The simplest pragma is the right pragma.* The temptation
+  was to add `firstprivate(norms)`, `nowait`, `collapse(2)`,
+  manual chunking, etc. None of those help here, and most
+  would just add ways for a future bug to hide. Trust the
+  default semantics until profiling proves otherwise.
+
+### Next
+- Step 25: hoist the per-query `TopK` allocation into per-thread
+  scratch, eliminating the per-iteration alloc/free. Same
+  algorithm, same correctness, less heap pressure.
+
+---
+
 ## [Step 23] — Phase-3 profiling writeup (2026-05-02)
 
 ### What

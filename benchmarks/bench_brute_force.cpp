@@ -190,6 +190,38 @@ BENCHMARK(BM_BruteForceL2Tiled_Synthetic)
     ->ArgsProduct({{1024}, {128}, {16, 32, 64}, {64, 128, 256}})
     ->Unit(benchmark::kMillisecond);
 
+/// Step-24 OpenMP variant. Same arithmetic as the norms path;
+/// the outer query loop is `#pragma omp parallel for`. The third
+/// state.range encodes the thread count so a single bench file
+/// produces the strong-scaling sweep.
+void BM_BruteForceL2Omp_Synthetic(benchmark::State& state)
+{
+    const std::size_t n  = static_cast<std::size_t>(state.range(0));
+    const std::size_t d  = static_cast<std::size_t>(state.range(1));
+    const int         t  = static_cast<int>(state.range(2));
+    constexpr std::size_t k = 10;
+    constexpr std::uint64_t seed = 42;
+
+    const knng::Dataset ds = make_synthetic(n, d, seed);
+
+    const knng::Knng truth = knng::cpu::brute_force_knn(
+        ds, k, knng::L2Squared{});
+    knng::Knng last;
+
+    for (auto _ : state) {
+        last = knng::cpu::brute_force_knn_l2_omp(ds, k, t);
+        benchmark::DoNotOptimize(last);
+        benchmark::ClobberMemory();
+    }
+
+    const double recall = knng::bench::recall_at_k(last, truth);
+    annotate(state, n, d, k, recall);
+    state.counters["threads"] = static_cast<double>(t);
+}
+BENCHMARK(BM_BruteForceL2Omp_Synthetic)
+    ->ArgsProduct({{1024}, {128}, {1, 2, 4, 8}})
+    ->Unit(benchmark::kMillisecond);
+
 /// Step-22 partial-sort variant. Same arithmetic as the norms
 /// path; replaces the streaming `TopK` heap with `std::partial_sort`
 /// over the full per-query candidate buffer.

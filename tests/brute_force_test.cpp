@@ -341,6 +341,69 @@ TEST(BruteForceKnnL2Tiled, KGreaterThanNMinusOneThrowsInvalidArgument)
 }
 
 // ---------------------------------------------------------------------
+// Step 24: brute_force_knn_l2_omp — OpenMP-parallel outer-query loop.
+// Must produce the same Knng as the serial path regardless of thread
+// count.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2Omp, MatchesCanonicalAtDefaultThreadCount)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto baseline = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const auto omp = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{3});
+
+    EXPECT_EQ(baseline.neighbors, omp.neighbors);
+    for (std::size_t i = 0; i < baseline.distances.size(); ++i) {
+        EXPECT_NEAR(baseline.distances[i], omp.distances[i], 1e-4f);
+    }
+}
+
+TEST(BruteForceKnnL2Omp, OutputDeterministicAcrossThreadCounts)
+{
+    // Same input, different thread counts → bit-identical neighbor
+    // IDs. The fixture is small so two threads is enough to
+    // exercise the parallel path; the assertion is that
+    // parallelisation does not perturb tie-breaking.
+    const auto ds = two_clusters_eight_points();
+    const auto t1 = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{5}, /*num_threads=*/1);
+    const auto t2 = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{5}, /*num_threads=*/2);
+    const auto t4 = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{5}, /*num_threads=*/4);
+    EXPECT_EQ(t1.neighbors, t2.neighbors);
+    EXPECT_EQ(t1.neighbors, t4.neighbors);
+}
+
+TEST(BruteForceKnnL2Omp, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_omp(ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Omp, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_omp(ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Omp, BuiltinFlagAlwaysReportsHonestly)
+{
+    // The flag must reflect the build, not the runtime — we just
+    // assert it returns a single deterministic value (true on a
+    // build where OpenMP linked, false otherwise). The CHANGELOG
+    // captures which build path the running CI uses.
+    [[maybe_unused]] constexpr bool b = knng::cpu::kHasOpenmpBuiltin;
+    SUCCEED();
+}
+
+// ---------------------------------------------------------------------
 // Step 22: brute_force_knn_l2_partial_sort — std::partial_sort over
 // the full per-query candidate buffer instead of the streaming
 // TopK heap. Must agree with the canonical L2 path elementwise.

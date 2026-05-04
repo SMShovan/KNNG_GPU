@@ -184,6 +184,49 @@ inline constexpr bool kHasBlasBuiltin =
     const Dataset& ds,
     std::size_t k);
 
+/// True iff this build of `knng::cpu` was compiled against an
+/// OpenMP runtime. Wraps the build-time `KNNG_HAVE_OPENMP` macro
+/// into a compile-time constant callers can check without
+/// preprocessor guards.
+inline constexpr bool kHasOpenmpBuiltin =
+#if defined(KNNG_HAVE_OPENMP) && KNNG_HAVE_OPENMP
+    true;
+#else
+    false;
+#endif
+
+/// L2 brute-force builder, OpenMP-parallel over the outer query
+/// loop.
+///
+/// Algorithmically identical to `brute_force_knn_l2_with_norms`
+/// (Step 19): same precomputed norms, same `||a||² + ||b||² - 2⟨a,b⟩`
+/// identity, same `TopK` heap admission. The only structural change
+/// is `#pragma omp parallel for schedule(static)` on the outer
+/// query loop.
+///
+/// Thread safety: each iteration writes into its own row of the
+/// output `Knng` (`out.neighbors_of(q)` and `out.distances_of(q)`
+/// are disjoint for distinct `q`) and uses its own `TopK` instance
+/// declared inside the loop. No locks, no atomics, no shared state
+/// beyond read-only `ds`, `norms`, and `base`.
+///
+/// Behaves identically to the serial path when the build did not
+/// link OpenMP (`!kHasOpenmpBuiltin`): the pragma is a comment and
+/// the loop runs single-threaded.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point.
+/// @param num_threads If > 0, sets `omp_set_num_threads(num_threads)`
+///        for this call. If 0 (default), uses the runtime's default
+///        (`OMP_NUM_THREADS` or the hardware concurrency).
+/// @return A `Knng` of shape `(ds.n, k)`; rows sorted ascending by
+///         distance with ties broken by ascending neighbor index.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_omp(
+    const Dataset& ds,
+    std::size_t k,
+    int num_threads = 0);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

@@ -17,6 +17,7 @@ add_library(knng::core ALIAS knng_core)
 
 set(_knng_cpu_sources
     cpu/brute_force.cpp
+    cpu/brute_force_omp.cpp
     cpu/distance.cpp
 )
 if(KNNG_HAVE_BLAS)
@@ -26,6 +27,9 @@ add_library(knng_cpu STATIC ${_knng_cpu_sources})
 target_link_libraries(knng_cpu PUBLIC knng::core)
 if(KNNG_HAVE_BLAS)
     target_link_libraries(knng_cpu PUBLIC knng::blas_iface)
+endif()
+if(KNNG_HAVE_OPENMP)
+    target_link_libraries(knng_cpu PUBLIC knng::openmp_iface)
 endif()
 knng_set_warnings(knng_cpu)
 add_library(knng::cpu ALIAS knng_cpu)

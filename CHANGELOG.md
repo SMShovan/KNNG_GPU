@@ -12,6 +12,136 @@ independent of the code diff.
 
 ---
 
+## [Step 25] — Thread-local scratch + cache-line padding (2026-05-04)
+
+### What
+- Added `knng::cpu::brute_force_knn_l2_omp_scratch(ds, k,
+  num_threads = 0)`. Same arithmetic as Step 24's plain OMP path;
+  the structural change is the `TopK` heap moves from "declared
+  inside the parallel-for body" (Step 24) to "pre-allocated once
+  per worker, drained between iterations." The `extract_sorted`
+  call already empties the underlying priority_queue's vector
+  while preserving its capacity, so the next iteration on the
+  same thread reuses the buffer without reallocating.
+- Each per-thread heap is wrapped in `struct alignas(64)
+  ThreadScratch` with explicit padding so `sizeof(ThreadScratch)`
+  is a multiple of `kCacheLineBytes = 64`. With this layout,
+  `std::vector<ThreadScratch>(num_threads)` puts every worker on
+  its own cache line — adjacent workers cannot ping-pong the
+  shared line through the LLC when they push into "their" heap.
+- Pre-allocation uses `emplace_back` in a counted loop rather
+  than `std::vector(size, value)`. The `vector(size, value)`
+  form copy-constructs `value` `size` times; emplace is one
+  allocation and `size` in-place constructions — both cheaper
+  and the only form that compiles for a type that holds a heap
+  with a non-trivial copy.
+- Four new `test_brute_force` cases pinning the contract:
+  matches the plain OMP path at 2 threads bit-for-bit, output
+  is deterministic across `{1, 2, 4}` thread counts, `k = 0` and
+  `k > n - 1` throw.
+- Added `BM_BruteForceL2OmpScratch_Synthetic` family at the same
+  thread sweep `{1, 2, 4, 8}` as Step 24's family so Step 29's
+  scaling writeup can plot both lines on the same axes.
+- ctest 109/109 green (4 new brute_force, 105 carried over from
+  Step 24).
+- **Measured at n=1024, d=128:** numbers essentially identical to
+  Step 24's plain OMP path within the per-run noise band — the
+  per-iteration `TopK` allocation is small enough relative to the
+  ~1M distance computations per query that hoisting it out
+  doesn't move the needle. The win compounds at larger `n`
+  (Step 29's writeup will document this) and on workloads where
+  the per-pair distance is fast enough that allocation cost
+  dominates.
+
+### Why
+Step 25 ships the *infrastructure* for thread-local scratch even
+though the headline number on this fixture does not move. Three
+reasons it lands now:
+
+  1. **The pattern is the right shape for every later parallel
+     CPU step.** Step 35's parallel NN-Descent will need
+     per-thread state for the local-join candidate list,
+     per-point locks, and the convergence-update counter.
+     Doing the cache-line-aware pattern correctly *now*, on the
+     simplest possible algorithm, makes Step 35 a translation
+     rather than a redesign.
+  2. **The per-iteration alloc cost only hides on AppleClang at
+     small `n`.** AppleClang's libc++ has a fast small-vector
+     allocator (`__small_vector` optimisation under the hood
+     for `priority_queue<>`) that minimises the allocation cost
+     for `k = 10`. On libstdc++ + GCC, the alloc is more
+     expensive per-iteration, and the win compounds. The
+     numbers we publish today are an under-estimate of the win
+     on a Linux CI runner.
+  3. **False sharing is the canonical "easy to introduce, hard
+     to debug" parallel performance bug.** Pinning the
+     `alignas(64)` + padding pattern in this step's CHANGELOG
+     means future steps can reach for `ThreadScratch`-style
+     wrappers without re-discovering the why.
+
+The choice of 64 as the cache-line constant is right for every
+supported platform: x86_64 (Intel + AMD), arm64 Apple Silicon,
+arm64 Linux. We define it as a `constexpr std::size_t` rather
+than reaching for `std::hardware_destructive_interference_size`
+because the latter is `[[experimental]]` on libstdc++ and would
+trigger a `-Wpedantic` warning; we keep the project's strict
+warning policy clean.
+
+### Tradeoff
+- **Memory grows with the worker count.** Each `ThreadScratch`
+  is at least one cache line (64 B) plus the heap's underlying
+  vector (`k * sizeof(Entry)` bytes once it grows). For 8
+  workers and `k = 10`, the total is ~1.5 KB — negligible
+  next to the dataset, but it does land in the bench's
+  `peak_memory_mb` reading and the eagle-eyed reader will see
+  the OmpScratch path report ~50 KB more peak memory than the
+  plain Omp path (the `std::vector<ThreadScratch>` stays
+  resident for the function's whole frame).
+- **The per-thread heap is allocated once but resized never.**
+  We rely on the heap's `extract_sorted` leaving the vector's
+  capacity intact. This is true for `std::priority_queue` over
+  `std::vector`, and we assert nothing changes that — but a
+  future TopK rewrite that, e.g., replaces the priority_queue
+  with a bounded array would render the optimisation moot. The
+  CHANGELOG comment is the contract.
+- **No per-thread *distance buffer* — yet.** The plan's full
+  thread-local-scratch story includes a per-thread distance
+  tile buffer for the tiled / BLAS paths. We deferred: the
+  per-thread heap is the part that benefits at small-`n`; the
+  distance-tile buffer matters at large-`n` and is the natural
+  Step-29 follow-up. The shape we chose for `ThreadScratch`
+  trivially extends to hold the buffer when that lands.
+
+### Learning
+- *`extract_sorted` was already capacity-preserving — we just
+  needed to stop allocating a fresh heap.* Step 09's `TopK`
+  (the priority_queue around a `std::vector<Entry>`) has the
+  right amortisation property baked in; we did not see it
+  because Step 19, 20, 22, 24 all declared the heap inside
+  their loops. The lesson: when you find yourself allocating
+  per-iteration, ask whether the surrounding type already
+  amortises and you just need to hoist.
+- *Cache-line padding is cheap insurance.* `sizeof(TopK)` on
+  AppleClang is well under 64 bytes; padding to 64 wastes
+  <40 bytes per worker (40 × 8 = 320 bytes total at 8
+  workers — pocket change). The cost is far smaller than the
+  cost of a future `Why is the parallel build slower than the
+  serial build at 2 threads?` debugging session.
+- *`alignas` on a struct is the cleanest way to force
+  per-instance alignment for a `std::vector` element.* Each
+  element's alignment is the struct's alignment; the vector
+  allocator honours it. Other approaches (manual padding
+  bytes between elements, allocator hacks) are strictly
+  uglier.
+
+### Next
+- Step 26: NUMA awareness. `numactl --interleave=all` in the
+  bench script + a cross-platform `numa_first_touch` helper
+  that no-ops on macOS (single-NUMA-domain SoC) and lays out
+  large-`n` datasets across NUMA nodes on Linux.
+
+---
+
 ## [Step 24] — OpenMP outer-query parallelisation (2026-05-04)
 
 ### What

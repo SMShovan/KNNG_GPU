@@ -227,6 +227,39 @@ inline constexpr bool kHasOpenmpBuiltin =
     std::size_t k,
     int num_threads = 0);
 
+/// L2 brute-force builder, OpenMP-parallel with per-thread scratch.
+///
+/// Same algorithm as `brute_force_knn_l2_omp` but with two
+/// false-sharing-aware refinements:
+///
+///   1. **Per-thread `TopK` heap pre-allocated once.** Step 24's
+///      variant declares the heap inside the parallel-for body, so
+///      every iteration paid the heap's `std::priority_queue`'s
+///      vector allocation. This variant pre-allocates one heap per
+///      OpenMP worker, then `extract_sorted` drains it between
+///      iterations — the allocation amortises across all queries.
+///   2. **Cache-line padding between per-thread heaps.** Each
+///      `ThreadScratch` is `alignas(64)` and padded so two
+///      adjacent heaps cannot share a cache line. Without padding,
+///      threads writing to neighbouring heaps would ping-pong the
+///      shared line through the LLC; with padding, every thread
+///      owns its own line cleanly.
+///
+/// Output is bit-equivalent to `brute_force_knn_l2_omp`. The win
+/// shows up at large `n` where the per-query allocation cost is a
+/// non-trivial fraction of the iteration body.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point.
+/// @param num_threads If > 0, sets the OpenMP team size for this
+///        call. If 0, uses the runtime's default.
+/// @return A `Knng` of shape `(ds.n, k)`.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_omp_scratch(
+    const Dataset& ds,
+    std::size_t k,
+    int num_threads = 0);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

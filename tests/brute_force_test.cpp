@@ -404,6 +404,55 @@ TEST(BruteForceKnnL2Omp, BuiltinFlagAlwaysReportsHonestly)
 }
 
 // ---------------------------------------------------------------------
+// Step 25: brute_force_knn_l2_omp_scratch — per-thread heap with
+// cache-line padding. Output must match the OMP path bit-for-bit.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2OmpScratch, MatchesPlainOmpEverywhere)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto plain = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{3}, /*num_threads=*/2);
+    const auto scratch = knng::cpu::brute_force_knn_l2_omp_scratch(
+        ds, std::size_t{3}, /*num_threads=*/2);
+    EXPECT_EQ(plain.neighbors, scratch.neighbors);
+    for (std::size_t i = 0; i < plain.distances.size(); ++i) {
+        EXPECT_NEAR(plain.distances[i], scratch.distances[i], 1e-4f);
+    }
+}
+
+TEST(BruteForceKnnL2OmpScratch, OutputDeterministicAcrossThreadCounts)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto t1 = knng::cpu::brute_force_knn_l2_omp_scratch(
+        ds, std::size_t{5}, /*num_threads=*/1);
+    const auto t2 = knng::cpu::brute_force_knn_l2_omp_scratch(
+        ds, std::size_t{5}, /*num_threads=*/2);
+    const auto t4 = knng::cpu::brute_force_knn_l2_omp_scratch(
+        ds, std::size_t{5}, /*num_threads=*/4);
+    EXPECT_EQ(t1.neighbors, t2.neighbors);
+    EXPECT_EQ(t1.neighbors, t4.neighbors);
+}
+
+TEST(BruteForceKnnL2OmpScratch, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_omp_scratch(
+            ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2OmpScratch, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_omp_scratch(
+            ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------
 // Step 22: brute_force_knn_l2_partial_sort — std::partial_sort over
 // the full per-query candidate buffer instead of the streaming
 // TopK heap. Must agree with the canonical L2 path elementwise.

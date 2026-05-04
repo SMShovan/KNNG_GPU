@@ -18,6 +18,7 @@ add_library(knng::core ALIAS knng_core)
 set(_knng_cpu_sources
     cpu/brute_force.cpp
     cpu/brute_force_omp.cpp
+    cpu/brute_force_threads.cpp
     cpu/distance.cpp
     cpu/numa.cpp
 )

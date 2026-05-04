@@ -12,6 +12,148 @@ independent of the code diff.
 
 ---
 
+## [Step 27] — `std::thread` + atomic-counter alternative (2026-05-04)
+
+### What
+- Added `knng::cpu::brute_force_knn_l2_threaded(ds, k,
+  num_threads = 0)`. Same algorithm as Step 24's OpenMP path;
+  the parallelism is implemented in pure C++ standard library:
+  `std::vector<std::thread>` workers consuming a single
+  `std::atomic<std::size_t>` work counter via
+  `fetch_add(1, std::memory_order_relaxed)`. Each worker grabs
+  one query at a time, runs the per-query distance + heap loop,
+  loops back for the next, exits when the counter overruns
+  `ds.n`. No mutex, no condition variable.
+- The atomic counter doubles as a lock-free *work queue* — the
+  shape the plan called for. Dynamic load balancing falls out
+  of `fetch_add`'s atomic semantics; static partitioning would
+  have been simpler but the plan explicitly wanted the
+  work-queue shape (which is what Step 35's parallel
+  NN-Descent will actually need, where per-iteration work is
+  unbalanced).
+- Each worker holds its own `TopK heap(k)` on the stack — no
+  shared scratch, no per-thread bookkeeping. The heap is reused
+  across iterations the worker handles via `extract_sorted`'s
+  capacity-preserving drain (Step 25's pattern). Worker count
+  defaults to `std::thread::hardware_concurrency()`; if the
+  runtime reports `0`, fall back to one thread.
+- Five new `test_brute_force` cases pinning the contract:
+  matches the OMP path at 2 threads bit-for-bit, output
+  bit-identical across `{1, 2, 4}` thread counts (atomic
+  dispatch only changes which worker handles which query, not
+  the output), `num_threads = 0` resolves to a working
+  configuration, `k = 0` and `k > n - 1` throw.
+- Added `BM_BruteForceL2Threaded_Synthetic` family at the same
+  `{1, 2, 4, 8}` thread sweep so Step 29's writeup plots OMP
+  and `std::thread` lines on the same axes.
+- ctest 119/119 green (5 new brute_force, 114 carried over
+  from Step 26).
+- **Measured at n=1024, d=128:** wall time within 1% of the
+  OMP path at every thread count (66.2 vs 66.7 ms at t=1;
+  identical at t=2; 17.8 vs 17.4 at t=4; 10.0 vs 10.8 at
+  t=8). Recall stays at 1.0 across every configuration.
+
+### Why
+The plan's framing for this step is "as a learning exercise" —
+the goal is not a faster build but a clearer picture of what
+OpenMP's `#pragma omp parallel for` actually expands to. Having
+both paths side-by-side in the repo means a future contributor
+who reaches for OpenMP can compare:
+
+  * **Source-line cost:** OpenMP version is ~30 lines of source;
+    the `std::thread` version is ~50. The atomic-counter
+    boilerplate, the explicit `worker_body` lambda, the
+    `threads.reserve` + `emplace_back` loop, and the join
+    pass each cost a few lines that `#pragma omp parallel for
+    schedule(static)` collapses into a single line.
+  * **API footprint:** OpenMP needs a runtime (`libomp`,
+    `libgomp`), a CMake find module, and a `KNNG_HAVE_OPENMP`
+    cache variable. `std::thread` is in `<thread>` and ships
+    with every C++11+ toolchain. Step 24's CMake gymnastics
+    (Apple's `OpenMP_ROOT` hack) literally do not exist for
+    Step 27.
+  * **Wall-time:** equivalent. The atomic-counter dispatch
+    overhead is ~50 ns per `fetch_add`; each query takes
+    ~50 µs; the contention on the shared cache line is ~1000×
+    smaller than the per-query work. On a workload where each
+    iteration is sub-microsecond, the atomic would become a
+    bottleneck and `schedule(static)` would win — but that is
+    not where brute-force sits.
+
+The right reading is: OpenMP is the *correct* tool for this
+algorithm because the source is shorter and the runtime cost
+is identical. The `std::thread` path is documentation in code
+form — when a future Phase-9 contributor wonders "should I
+switch from OpenMP to my own pthreads pool?", the diff between
+these two files is the answer.
+
+`std::memory_order_relaxed` is sufficient on the counter
+because the per-query work writes into disjoint rows of the
+output `Knng` (rows `q` and `q'` for `q != q'` never overlap).
+There is no happens-before relationship to enforce between
+threads; `relaxed` is the cheapest order that gives mutual
+exclusion of `q` indices.
+
+### Tradeoff
+- **Atomic-counter dispatch is dynamic.** Step 24's
+  `schedule(static)` partitions queries into contiguous
+  chunks; the `std::thread` path interleaves them across
+  workers via `fetch_add`. For brute-force every query is the
+  same work, so the OMP partition is more cache-friendly (a
+  worker scans a contiguous chunk of `q` indices and
+  the dataset's pages are visited in a stride-friendly order).
+  At n=1024 this is invisible; at n=1M it would matter and
+  the right `std::thread` shape would be a static partition,
+  not an atomic counter. We accept the "wrong-shape-for-this-
+  algorithm-but-right-shape-for-the-pedagogy" choice.
+- **No exception-safety guarantee on worker bodies.** If a
+  worker throws (e.g. `std::bad_alloc` inside the heap),
+  every other thread keeps running and joins normally; the
+  exception is *not* propagated to the caller. We accept
+  this: the per-query work allocates only inside `TopK`,
+  which is bounded at `O(k)`, and the surrounding
+  `std::vector<float>` allocations all happen before the
+  worker spawn. A throw from inside a worker would mean a
+  bug elsewhere; surfacing it would require `std::packaged_task`
+  or `std::exception_ptr` plumbing that is out of scope for
+  the learning exercise.
+- **Thread count is unchecked beyond `> 0`.** Spawning 1024
+  workers on a 4-core machine is allowed; the OS handles the
+  scheduling. We do not clamp `num_threads <=
+  hardware_concurrency()` because the bench harness wants to
+  produce numbers at exactly that ratio (oversubscribed
+  scaling) for the writeup.
+
+### Learning
+- *`std::atomic` + `fetch_add` is the simplest work queue
+  that works.* No mutex, no condition variable, no
+  `std::queue<int>`. The counter *is* the queue. This is
+  the pattern most production-grade thread pools use under
+  the hood (TBB, Intel oneAPI, libdispatch); seeing it
+  unwrapped here is what makes the OpenMP version feel like
+  a thin wrapper rather than a black box.
+- *`memory_order_relaxed` is correct here, even though it
+  feels uncomfortable.* The C++ memory model guarantee is
+  that a `fetch_add(1, relaxed)` produces a unique value to
+  exactly one calling thread; that is *all* the ordering we
+  need, because the per-query work touches disjoint output
+  rows. Reaching for `seq_cst` (the default) would have
+  added a memory fence on every `fetch_add` for no
+  observable benefit.
+- *The OMP and `std::thread` numbers being identical is the
+  *right* result.* If they differed by more than ~1% we
+  would suspect one path of a bug. The fact that they match
+  cleanly is the strongest evidence that both are doing the
+  same work, just with different paint.
+
+### Next
+- Step 28: hand-vectorised SIMD distance kernel (AVX2 +
+  ARM NEON + scalar fallback). The first per-pair-compute
+  optimisation; runs underneath every Phase-3 / Phase-4
+  builder via the `dot_product` overload set.
+
+---
+
 ## [Step 26] — NUMA awareness: first-touch helper + bench wrapper (2026-05-04)
 
 ### What

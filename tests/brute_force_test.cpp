@@ -453,6 +453,70 @@ TEST(BruteForceKnnL2OmpScratch, KGreaterThanNMinusOneThrowsInvalidArgument)
 }
 
 // ---------------------------------------------------------------------
+// Step 27: brute_force_knn_l2_threaded — std::thread + atomic
+// counter work-queue. Output must match the OMP path bit-for-bit.
+// ---------------------------------------------------------------------
+
+TEST(BruteForceKnnL2Threaded, MatchesOmpPathAt2Threads)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto omp = knng::cpu::brute_force_knn_l2_omp(
+        ds, std::size_t{3}, /*num_threads=*/2);
+    const auto threaded = knng::cpu::brute_force_knn_l2_threaded(
+        ds, std::size_t{3}, /*num_threads=*/2);
+    EXPECT_EQ(omp.neighbors, threaded.neighbors);
+    for (std::size_t i = 0; i < omp.distances.size(); ++i) {
+        EXPECT_NEAR(omp.distances[i], threaded.distances[i], 1e-4f);
+    }
+}
+
+TEST(BruteForceKnnL2Threaded, OutputDeterministicAcrossThreadCounts)
+{
+    // Atomic-counter dispatch only changes which worker handles
+    // which query; the per-query computation is the same. Output
+    // must be bit-identical across thread counts.
+    const auto ds = two_clusters_eight_points();
+    const auto t1 = knng::cpu::brute_force_knn_l2_threaded(
+        ds, std::size_t{5}, /*num_threads=*/1);
+    const auto t2 = knng::cpu::brute_force_knn_l2_threaded(
+        ds, std::size_t{5}, /*num_threads=*/2);
+    const auto t4 = knng::cpu::brute_force_knn_l2_threaded(
+        ds, std::size_t{5}, /*num_threads=*/4);
+    EXPECT_EQ(t1.neighbors, t2.neighbors);
+    EXPECT_EQ(t1.neighbors, t4.neighbors);
+}
+
+TEST(BruteForceKnnL2Threaded, DefaultThreadCountFallsBackToHardware)
+{
+    // Passing num_threads=0 must use hardware_concurrency() (or 1
+    // if the runtime cannot determine a value). The function must
+    // not throw or hang regardless of which the runtime reports.
+    const auto ds = two_clusters_eight_points();
+    const auto g = knng::cpu::brute_force_knn_l2_threaded(
+        ds, std::size_t{3}, /*num_threads=*/0);
+    EXPECT_EQ(g.n, ds.n);
+    EXPECT_EQ(g.k, std::size_t{3});
+}
+
+TEST(BruteForceKnnL2Threaded, ZeroKThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_threaded(
+            ds, std::size_t{0}); },
+        std::invalid_argument);
+}
+
+TEST(BruteForceKnnL2Threaded, KGreaterThanNMinusOneThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    EXPECT_THROW(
+        { (void)knng::cpu::brute_force_knn_l2_threaded(
+            ds, std::size_t{8}); },
+        std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------
 // Step 22: brute_force_knn_l2_partial_sort — std::partial_sort over
 // the full per-query candidate buffer instead of the streaming
 // TopK heap. Must agree with the canonical L2 path elementwise.

@@ -260,6 +260,43 @@ inline constexpr bool kHasOpenmpBuiltin =
     std::size_t k,
     int num_threads = 0);
 
+/// L2 brute-force builder using `std::thread` + atomic work queue.
+///
+/// A learning-exercise alternative to the OpenMP variants
+/// (`brute_force_knn_l2_omp` / `_omp_scratch`). Spawns
+/// `num_threads` workers that consume queries from a single shared
+/// `std::atomic<std::size_t>` counter via `fetch_add`. Each worker
+/// processes whichever query it grabbed, then loops back for the
+/// next — giving dynamic load balancing without a mutex-protected
+/// queue.
+///
+/// API contrasts (vs OpenMP path):
+///   * **Source-line cost.** OpenMP version is ~30 lines; this is
+///     ~50. `std::thread` ergonomics (capture-by-reference for
+///     shared state, explicit join, `std::atomic` for the
+///     counter) are louder than `#pragma omp parallel for`.
+///   * **Wall-time.** Roughly equivalent on this fixture; the
+///     atomic-counter contention is invisible at n=1024 because
+///     each query takes ~50 µs, far longer than the
+///     `fetch_add` cycle. On workloads with sub-microsecond
+///     per-query work, the atomic would become a bottleneck.
+///   * **Determinism.** Both paths emit bit-identical output for
+///     the same input — atomic-counter dispatch only changes
+///     *which thread* processes which query, not the output.
+///
+/// Output is bit-equivalent to `brute_force_knn_l2_omp_scratch`.
+///
+/// @param ds Reference / query set.
+/// @param k Number of neighbors per point.
+/// @param num_threads If > 0, spawns this many workers. If 0
+///        (default), uses `std::thread::hardware_concurrency()`.
+/// @return A `Knng` of shape `(ds.n, k)`.
+/// @throws std::invalid_argument on malformed inputs.
+[[nodiscard]] Knng brute_force_knn_l2_threaded(
+    const Dataset& ds,
+    std::size_t k,
+    int num_threads = 0);
+
 /// Build an exact K-nearest-neighbor graph by brute force.
 ///
 /// For each row `q` of `ds`, the function scores every other row `r`

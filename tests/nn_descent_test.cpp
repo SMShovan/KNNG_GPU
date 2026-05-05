@@ -671,6 +671,115 @@ TEST(NnDescent, NonPositiveRhoThrows)
         std::invalid_argument);
 }
 
+// --- parallel kernels (Step 36) ------------------------------------
+
+TEST(LocalJoinOmp, MatchesSerialOnSmallFixture)
+{
+    // The 8-point fixture has unique-by-distance neighbours
+    // within the relevant top-k slots, so neighbour IDs match
+    // exactly between serial and parallel paths.
+    const auto ds = two_clusters_eight_points();
+    auto g_serial = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+    auto g_omp = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    (void)knng::cpu::local_join(ds, g_serial, knng::L2Squared{});
+    (void)knng::cpu::local_join_omp(
+        ds, g_omp, /*num_threads=*/4, knng::L2Squared{});
+
+    EXPECT_EQ(g_serial.to_knng().neighbors,
+              g_omp.to_knng().neighbors);
+}
+
+TEST(LocalJoinWithReverseOmp, MatchesSerialOnSmallFixture)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g_serial = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+    auto g_omp = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    (void)knng::cpu::local_join_with_reverse(
+        ds, g_serial, knng::L2Squared{});
+    (void)knng::cpu::local_join_with_reverse_omp(
+        ds, g_omp, /*num_threads=*/4, knng::L2Squared{});
+
+    EXPECT_EQ(g_serial.to_knng().neighbors,
+              g_omp.to_knng().neighbors);
+}
+
+TEST(LocalJoinOmp, ConvergesToBruteForceWithParallelDriver)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+
+    knng::cpu::NnDescentConfig cfg{};
+    cfg.max_iters   = 16;
+    cfg.delta       = 0.0;
+    cfg.num_threads = 4;
+    const auto g = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg, knng::L2Squared{});
+    EXPECT_DOUBLE_EQ(knng::bench::recall_at_k(g, truth), 1.0);
+}
+
+TEST(LocalJoinOmp, ParallelDriverOutputDeterministicAcrossThreadCounts)
+{
+    // Different thread counts shouldn't change neighbour IDs on
+    // the 8-point fixture (unique-by-distance candidates). At
+    // larger n the same property holds modulo fp accumulation
+    // order, but the small-fixture check is the strict one.
+    const auto ds = two_clusters_eight_points();
+    auto run = [&](int t) {
+        knng::cpu::NnDescentConfig cfg{};
+        cfg.max_iters   = 16;
+        cfg.delta       = 0.0;
+        cfg.num_threads = t;
+        return knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{});
+    };
+    const auto t1 = run(1);
+    const auto t2 = run(2);
+    const auto t4 = run(4);
+    EXPECT_EQ(t1.neighbors, t2.neighbors);
+    EXPECT_EQ(t1.neighbors, t4.neighbors);
+}
+
+TEST(LocalJoinOmp, GraphSizeMismatchThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentGraph wrong(ds.n + 1, 3);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_omp(
+            ds, wrong, 2, knng::L2Squared{}); },
+        std::invalid_argument);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_with_reverse_omp(
+            ds, wrong, 2, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
+TEST(NnDescent, ParallelDriverFallsBackToSerialUnderRhoSampling)
+{
+    // num_threads > 1 + rho < 1.0 → silent fall-through to the
+    // serial sampled kernel. The output should match what we get
+    // with num_threads = 1 + same rho.
+    const auto ds = two_clusters_eight_points();
+    auto run = [&](int t) {
+        knng::cpu::NnDescentConfig cfg{};
+        cfg.max_iters   = 8;
+        cfg.delta       = 0.0;
+        cfg.rho         = 0.5;
+        cfg.num_threads = t;
+        return knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{});
+    };
+    const auto serial   = run(1);
+    const auto parallel = run(4);
+    EXPECT_EQ(serial.neighbors, parallel.neighbors);
+}
+
 TEST(NnDescent, RhoSweepOnLogShowsDecreasingPerIterWork)
 {
     // Ablation knob sanity check: at rho=0.3 the per-iteration

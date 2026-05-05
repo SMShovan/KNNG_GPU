@@ -12,6 +12,183 @@ independent of the code diff.
 
 ---
 
+## [Step 36] — Parallel NN-Descent (OpenMP) (2026-05-05)
+
+### What
+- Added two parallel kernels:
+  * `local_join_omp<D>(ds, graph, num_threads, distance)` —
+    OpenMP-parallel sibling of `local_join` (Step 32).
+  * `local_join_with_reverse_omp<D>(ds, graph, num_threads,
+    distance)` — OpenMP-parallel sibling of
+    `local_join_with_reverse` (Step 34).
+- Both use a per-point `std::mutex` array (new private
+  `PerPointLocks` helper holding a `std::unique_ptr<std::mutex[]>`)
+  to protect every list insert. Insert pairs `(u, v)` acquire
+  the locks one-at-a-time (lock-insert-unlock for `u`, then
+  for `v`) — never two locks simultaneously, so deadlock is
+  structurally impossible. Inserts into the same point
+  serialise; inserts into different points proceed in
+  parallel.
+- The reverse-list construction in
+  `local_join_with_reverse_omp` is also parallelised, with a
+  *separate* per-point lock array (`rev_locks`) so concurrent
+  pushes to `rev_new[u]` and concurrent forward inserts on the
+  same `u` do not contend on a shared lock.
+- Per-iteration update accumulation uses
+  `std::atomic<std::size_t>` with `memory_order_relaxed`. The
+  count is the only shared write across threads; relaxed is
+  sufficient because no other shared state has a happens-before
+  relationship to the count.
+- New private helper `join_pairs_locked<D>` mirrors
+  `join_pairs<D>` from Step 34 but adds the lock-guarded
+  inserts. The two function bodies look nearly identical;
+  duplication is the price of not paying mutex overhead in the
+  serial path.
+- Extended `NnDescentConfig` with `int num_threads = 0`
+  (`0` → runtime default; `1` → serial; `>1` → parallel team
+  size). Parallelism is *only* applied when `cfg.rho == 1.0`;
+  if `cfg.rho < 1.0`, the driver silently falls back to the
+  serial sampled kernel. The interaction is documented in
+  `NnDescentConfig::num_threads`.
+- Driver now picks one of *six* kernel variants based on
+  `(use_reverse, rho < 1.0, num_threads != 1)`. The selection
+  table is in the inline comment above the loop.
+- Added `benchmarks/bench_nn_descent.cpp` —
+  `BM_NnDescent_Synthetic` family that sweeps
+  `(threads ∈ {1, 4}, use_reverse ∈ {0, 1}, rho ∈ {0.3, 0.5,
+  1.0})` at `n=1024, d=128, k=10`. The bench emits the
+  project-standard counters (`recall_at_k`, `peak_memory_mb`,
+  `n_distance_computations`) plus NN-Descent specific fields
+  (`iterations`, `rho`, `use_reverse`, `threads`). Step 37's
+  writeup ingests this JSON.
+- Six new `test_nn_descent` cases:
+  * `local_join_omp` matches serial on the 8-point fixture.
+  * `local_join_with_reverse_omp` matches serial on the
+    8-point fixture.
+  * Parallel driver still converges to `recall@k = 1.0`.
+  * Parallel driver output is bit-identical across
+    `num_threads ∈ {1, 2, 4}` (small-fixture property).
+  * Graph-size mismatch throws on both parallel kernels.
+  * Parallel driver with `rho < 1.0` silently falls back to
+    serial sampled (output matches `num_threads = 1`).
+- ctest 182/182 green (6 new nn_descent, 176 carried over
+  from Step 35).
+- **Measured at n=1024, d=128, k=10, reverse=true, rho=1.0:**
+  serial 54.1 ms → 4 threads 27.3 ms — **~2× speedup**, recall
+  stays at `0.858` regardless of thread count.
+
+### Why
+Phases 4 ended with parallel brute-force at 8 threads showing
+6.6× scaling on Apple M-series. NN-Descent's
+inherently-sequential local-join (each iteration depends on
+the previous iteration's snapshot) makes the same shape harder
+to parallelise: the point-level outer loop *can* run in
+parallel within an iteration, but the inner inserts mutate
+shared per-point lists and need synchronisation. This step
+ships the synchronisation infrastructure.
+
+The per-point lock choice rather than atomics is deliberate:
+the `NeighborList::insert` operation is *not* a CAS-friendly
+single-word swap. It walks a sorted vector, compares against
+the worst entry, potentially evicts a tail element, and
+reinserts at a sorted position — multiple memory writes across
+the vector's storage. CAS-on-distance variants exist
+(used by some GPU NN-Descent implementations) but they require
+a different list shape (fixed-size array of atomic
+`{id, dist}` pairs); the per-point mutex is the correct match
+for our `std::vector`-backed list.
+
+The `relaxed` memory ordering on the update counter has been
+deliberately weakened from the default `seq_cst`: the count
+is consumed only after every worker has joined (the implicit
+barrier at the end of `#pragma omp parallel for`), so no
+happens-before relationship needs to span the `fetch_add`
+calls. This is the same justification we used for the
+`std::thread` work-queue counter in Step 27 — same reasoning,
+same `relaxed` choice.
+
+The "rho-and-parallelism don't compose" decision is a
+deliberate scope limitation. Adding parallel sampling would
+require either (a) per-thread local RNGs seeded
+deterministically — which complicates the
+"same `cfg.seed` ⇒ bit-identical output" contract that runs
+through every test — or (b) a single shared RNG with locking,
+which would re-introduce the bottleneck we just removed.
+Phase 9's GPU NN-Descent will need to re-confront this
+question; on CPU we accept the silent fall-through and document
+it loudly in `NnDescentConfig::num_threads`.
+
+The 2× speedup at 4 threads (vs the 4× ideal) reflects the
+synchronisation cost: every insert pays a mutex lock + unlock,
+and the serial reverse-list construction is now parallelised
+but introduces a separate set of locks. On larger `n` the
+speedup grows because the per-point lock contention probability
+shrinks (more points spread across the threads).
+
+### Tradeoff
+- **Per-point `std::mutex` array is `O(n * sizeof(std::mutex))`
+  memory.** For `n = 1M, sizeof(std::mutex) ~ 40 bytes`, that
+  is ~40 MB per iteration. Allocated fresh every iteration so
+  it does not accumulate. A future optimisation is to amortise
+  the mutex array across iterations (the algorithm does not
+  invalidate it between iterations) — a one-line refactor we
+  defer to bench-driven follow-up.
+- **`join_pairs_locked` duplicates the body of `join_pairs`.**
+  Keeping them separate avoids paying lock overhead in the
+  serial path. A future "policy" template parameter could
+  unify them but would be more complex than two
+  near-identical 30-line functions.
+- **The atomic counter is a hot cache line.** Every iteration's
+  worker `fetch_add`s into one atomic; on n=1024 with 4
+  threads the contention is invisible, but at 32 threads it
+  could become a bottleneck. The fix is per-thread local
+  counts summed at the end (the standard "false-sharing-free
+  reduction" pattern); we ship the simpler shape today.
+- **Reverse-list construction parallelised but not pipelined.**
+  Phase 2's lock-guarded pushes pay synchronisation overhead
+  even though the work is conceptually independent across
+  source points. A lock-free append (e.g. per-thread reverse
+  buffers + a final concat) would be faster but more code.
+  We accept the locked variant.
+
+### Learning
+- *Per-point locks are the canonical
+  "irregular-write parallelism" pattern.* Brute-force gets to
+  use `schedule(static)` with no locks because every output
+  cell is touched by exactly one worker. NN-Descent inherits
+  the irregular-write structure of every graph algorithm —
+  neighbour insertion can come from any direction — and
+  per-target locks are how you get correctness without paying
+  the all-locks-on-everyone tax. Pinning this pattern now
+  makes Step 65's GPU `atomicMin` formulation read as the
+  GPU translation of a known shape rather than a new puzzle.
+- *Releasing each lock between the two halves of a pair-update
+  is the simplest deadlock-prevention strategy.* The
+  alternative (always lock `min(u, v)` first then
+  `max(u, v)`) is correct and slightly faster (one less
+  mutex round-trip per pair) but easier to get wrong if a
+  future contributor adds a third lock. The current shape is
+  obviously correct on inspection; we accept the
+  trivial perf cost.
+- *"Sampling and parallelism don't compose, so the driver
+  silently picks serial" is a UX choice worth documenting.*
+  The alternative — throwing or warning — would force every
+  caller to handle the combination explicitly. The
+  silent fall-through is the kind of "principle of least
+  surprise" decision that reads well in the
+  `NnDescentConfig::num_threads` comment but would be
+  invisible without it.
+
+### Next
+- Step 37: NN-Descent recall writeup
+  (`docs/NN_DESCENT.md`). Pareto plot: recall@k vs wall time
+  across brute-force (Phase 3 + 4) and NN-Descent (Phase 5)
+  on the 1024-point fixture and — when a Linux runner is
+  available — SIFT1M. Closes Phase 5 with the standard
+  five-section writeup template established in Step 23.
+
+---
+
 ## [Step 35] — Sampling (`rho` parameter) (2026-05-05)
 
 ### What

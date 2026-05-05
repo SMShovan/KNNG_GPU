@@ -27,3 +27,18 @@ knng_set_warnings(bench_brute_force)
 set_target_properties(bench_brute_force PROPERTIES
     OUTPUT_NAME "bench_brute_force"
 )
+
+# `bench_nn_descent` — Phase-5 NN-Descent timing harness across
+# threads × use_reverse × rho. Step 37's writeup ingests the JSON.
+add_executable(bench_nn_descent bench_nn_descent.cpp)
+target_link_libraries(bench_nn_descent
+    PRIVATE
+        knng::bench
+        knng::cpu
+        benchmark::benchmark_main
+)
+knng_set_warnings(bench_nn_descent)
+
+set_target_properties(bench_nn_descent PROPERTIES
+    OUTPUT_NAME "bench_nn_descent"
+)

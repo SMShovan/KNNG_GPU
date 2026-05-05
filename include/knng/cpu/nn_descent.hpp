@@ -269,6 +269,53 @@ template <Distance D>
     std::uint64_t iter_seed,
     D distance = D{});
 
+/// OpenMP-parallel variant of `local_join` (Step 36). The
+/// outer point loop is `#pragma omp parallel for schedule(static)`;
+/// every per-point list insert is protected by a per-point
+/// `std::mutex` so two threads concurrently inserting into the
+/// same list serialise cleanly. Inserts into *different* lists
+/// proceed in parallel.
+///
+/// Output is bit-equivalent to serial `local_join` *modulo* the
+/// fp ordering of the dot-product inside `distance(...)` (which
+/// can vary across the per-thread call sites). For
+/// hand-verified small fixtures with unique-by-distance
+/// neighbours, the neighbour IDs match exactly.
+///
+/// Behaves identically to the serial path when the build did not
+/// link OpenMP (`!kHasOpenmpBuiltin`): the `#pragma omp` is a
+/// comment and the loop runs single-threaded.
+///
+/// @param num_threads If `> 0`, sets the OpenMP team size for
+///        this call. If `0` (default), uses the runtime's
+///        default.
+template <Distance D>
+[[nodiscard]] std::size_t local_join_omp(
+    const Dataset& ds,
+    NnDescentGraph& graph,
+    int num_threads = 0,
+    D distance = D{});
+
+/// OpenMP-parallel variant of `local_join_with_reverse`
+/// (Step 36). Same parallelism strategy as `local_join_omp`:
+/// outer point loop parallelised with `schedule(static)`,
+/// per-point `std::mutex` array protects every list insert.
+///
+/// The reverse-list construction (the per-iteration
+/// `O(n*k)` walk that builds `rev_new` / `rev_old`) is also
+/// parallelised — it pushes to `rev_new[u]` from many threads,
+/// so each push is lock-guarded by the same per-point mutex
+/// array (a separate stripe array; concurrent inserts into the
+/// reverse list of point `u` and concurrent inserts into the
+/// forward list of point `u` use *different* locks so they do
+/// not contend).
+template <Distance D>
+[[nodiscard]] std::size_t local_join_with_reverse_omp(
+    const Dataset& ds,
+    NnDescentGraph& graph,
+    int num_threads = 0,
+    D distance = D{});
+
 /// Tunable knobs for the convergence-driven NN-Descent driver.
 struct NnDescentConfig {
     /// Hard cap on iterations. The convergence criterion is the
@@ -316,6 +363,19 @@ struct NnDescentConfig {
     /// datasets, so the *right* default is "no sampling" and
     /// the knob exists for ablation. `rho ≤ 0.0` throws.
     double rho = 1.0;
+
+    /// Worker count for the OpenMP-parallel kernels (Step 36).
+    /// `0` (default) uses the runtime's default count; `1` runs
+    /// the serial kernel; `>1` runs the parallel kernel with
+    /// the requested team size. Parallelism is *only* applied
+    /// when `rho == 1.0`; if `rho < 1.0`, the driver falls back
+    /// to the serial sampled kernel regardless of this field.
+    /// (The sampled kernel's per-iteration RNG threads through
+    /// the `iter_seed` parameter and parallel sampling would
+    /// require a different RNG topology — out of scope for
+    /// Phase 5; revisit when Step 9's GPU port re-confronts
+    /// the question.)
+    int num_threads = 0;
 };
 
 /// Per-iteration statistics emitted by `nn_descent_with_log`. The

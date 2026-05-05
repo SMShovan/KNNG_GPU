@@ -17,12 +17,19 @@
 #include "knng/cpu/nn_descent.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#if defined(KNNG_HAVE_OPENMP) && KNNG_HAVE_OPENMP
+#  include <omp.h>
+#endif
 
 #include "knng/random.hpp"
 
@@ -134,6 +141,29 @@ template NnDescentGraph init_random_graph<NegativeInnerProduct>(
 
 namespace {
 
+/// One `std::mutex` per point. The natural data structure for
+/// the parallel local-join's per-point insert lock array.
+/// Stored as a heap-allocated `std::mutex[]` because
+/// `std::mutex` is non-copyable / non-movable so
+/// `std::vector<std::mutex>` is awkward to size.
+class PerPointLocks {
+public:
+    explicit PerPointLocks(std::size_t n)
+        : locks_(std::make_unique<std::mutex[]>(n)), size_(n) {}
+
+    [[nodiscard]] std::mutex& at(std::size_t i) noexcept
+    {
+        assert(i < size_);
+        return locks_[i];
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
+private:
+    std::unique_ptr<std::mutex[]> locks_;
+    std::size_t                   size_;
+};
+
 /// Snapshot every point's new / old ids and flip every list
 /// entry to `is_new = false`. Shared by `local_join` and
 /// `local_join_with_reverse`.
@@ -157,6 +187,70 @@ void snapshot_and_age(NnDescentGraph& graph,
         }
         graph.at(p).mark_all_old();
     }
+}
+
+/// Lock-protected variant of `join_pairs` for the parallel
+/// kernels. Each insert acquires the lock for the target point
+/// (release before the next pair). Two locks are *not* held
+/// simultaneously; instead we lock-insert-unlock for `u`, then
+/// lock-insert-unlock for `v`. This is correct because each
+/// list's invariants are intra-list (sortedness, capacity), not
+/// across pairs of lists. It also means we cannot deadlock.
+template <Distance D>
+std::size_t join_pairs_locked(const Dataset& ds,
+                               NnDescentGraph& graph,
+                               PerPointLocks& locks,
+                               const std::vector<index_t>& nv,
+                               const std::vector<index_t>& ov,
+                               D distance)
+{
+    std::size_t updates = 0;
+
+    // new × new — only u < v to avoid double-visiting.
+    for (std::size_t i = 0; i + 1 < nv.size(); ++i) {
+        const index_t u = nv[i];
+        const auto    a = ds.row(u);
+        for (std::size_t j = i + 1; j < nv.size(); ++j) {
+            const index_t v = nv[j];
+            if (u == v) continue;
+            const float d = distance(a, ds.row(v));
+            {
+                std::lock_guard<std::mutex> g(locks.at(u));
+                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+            {
+                std::lock_guard<std::mutex> g(locks.at(v));
+                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+        }
+    }
+
+    // new × old.
+    for (const index_t u : nv) {
+        const auto a = ds.row(u);
+        for (const index_t v : ov) {
+            if (u == v) continue;
+            const float d = distance(a, ds.row(v));
+            {
+                std::lock_guard<std::mutex> g(locks.at(u));
+                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+            {
+                std::lock_guard<std::mutex> g(locks.at(v));
+                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+        }
+    }
+
+    return updates;
 }
 
 /// Enumerate `(new × new, u < v)` and `(new × old)` pairs and
@@ -612,6 +706,171 @@ template std::size_t local_join_with_reverse_sampled<NegativeInnerProduct>(
     const Dataset&, NnDescentGraph&, double, std::uint64_t,
     NegativeInnerProduct);
 
+template <Distance D>
+std::size_t local_join_omp(const Dataset& ds,
+                            NnDescentGraph& graph,
+                            int num_threads,
+                            D distance)
+{
+    const std::size_t n = ds.n;
+    if (graph.n() != n) {
+        throw std::invalid_argument(
+            "knng::cpu::local_join_omp: graph.n != ds.n");
+    }
+    assert(ds.is_contiguous());
+
+#if defined(KNNG_HAVE_OPENMP) && KNNG_HAVE_OPENMP
+    if (num_threads > 0) {
+        omp_set_num_threads(num_threads);
+    }
+#else
+    (void)num_threads;
+#endif
+
+    std::vector<std::vector<index_t>> new_ids;
+    std::vector<std::vector<index_t>> old_ids;
+    snapshot_and_age(graph, new_ids, old_ids);
+
+    PerPointLocks locks(n);
+    std::atomic<std::size_t> updates{0};
+
+    const long long n_signed = static_cast<long long>(n);
+#pragma omp parallel for schedule(static)
+    for (long long p_signed = 0; p_signed < n_signed; ++p_signed) {
+        const std::size_t p = static_cast<std::size_t>(p_signed);
+        const std::size_t u = join_pairs_locked(
+            ds, graph, locks, new_ids[p], old_ids[p], distance);
+        if (u != 0) {
+            updates.fetch_add(u, std::memory_order_relaxed);
+        }
+    }
+
+    return updates.load(std::memory_order_relaxed);
+}
+
+template <Distance D>
+std::size_t local_join_with_reverse_omp(const Dataset& ds,
+                                          NnDescentGraph& graph,
+                                          int num_threads,
+                                          D distance)
+{
+    const std::size_t n = ds.n;
+    if (graph.n() != n) {
+        throw std::invalid_argument(
+            "knng::cpu::local_join_with_reverse_omp: graph.n != ds.n");
+    }
+    assert(ds.is_contiguous());
+
+#if defined(KNNG_HAVE_OPENMP) && KNNG_HAVE_OPENMP
+    if (num_threads > 0) {
+        omp_set_num_threads(num_threads);
+    }
+#else
+    (void)num_threads;
+#endif
+
+    // Phase 1: snapshot — same as serial version. The snapshot
+    // routine is per-point, no inter-point dependencies, so it
+    // is naturally parallel. We could parallelise here with
+    // another `#pragma omp` but the per-iteration cost is
+    // dominated by phases 2 and 3, so we keep it serial for now.
+    std::vector<std::vector<index_t>> new_ids;
+    std::vector<std::vector<index_t>> old_ids;
+    snapshot_and_age(graph, new_ids, old_ids);
+
+    // Phase 2: build reverse lists. The push to `rev_new[u]`
+    // happens from many threads concurrently when multiple
+    // points list `u` as a (sampled) neighbour, so each push is
+    // lock-guarded. Use a *separate* per-point lock array from
+    // the insert locks — concurrent inserts to forward and
+    // reverse lists of the same point should not contend.
+    std::vector<std::vector<index_t>> rev_new(n);
+    std::vector<std::vector<index_t>> rev_old(n);
+    PerPointLocks rev_locks(n);
+
+    const long long n_signed = static_cast<long long>(n);
+#pragma omp parallel for schedule(static)
+    for (long long p_signed = 0; p_signed < n_signed; ++p_signed) {
+        const std::size_t p  = static_cast<std::size_t>(p_signed);
+        const index_t     pi = static_cast<index_t>(p);
+        for (const index_t u : new_ids[p]) {
+            std::lock_guard<std::mutex> g(rev_locks.at(u));
+            rev_new[u].push_back(pi);
+        }
+        for (const index_t u : old_ids[p]) {
+            std::lock_guard<std::mutex> g(rev_locks.at(u));
+            rev_old[u].push_back(pi);
+        }
+    }
+
+    // Phase 3: per-point local-join. Forward-list inserts are
+    // protected by `insert_locks`. Each thread keeps its own
+    // `nv_total` / `ov_total` scratch via `firstprivate` (the
+    // declarations inside the parallel for are
+    // privatised by default).
+    PerPointLocks insert_locks(n);
+    std::atomic<std::size_t> updates{0};
+
+#pragma omp parallel for schedule(static)
+    for (long long p_signed = 0; p_signed < n_signed; ++p_signed) {
+        const std::size_t p = static_cast<std::size_t>(p_signed);
+
+        std::vector<index_t> nv_total;
+        std::vector<index_t> ov_total;
+        nv_total.insert(nv_total.end(),
+                        new_ids[p].begin(), new_ids[p].end());
+        nv_total.insert(nv_total.end(),
+                        rev_new[p].begin(), rev_new[p].end());
+        ov_total.insert(ov_total.end(),
+                        old_ids[p].begin(), old_ids[p].end());
+        ov_total.insert(ov_total.end(),
+                        rev_old[p].begin(), rev_old[p].end());
+
+        sort_unique(nv_total);
+        sort_unique(ov_total);
+        if (!nv_total.empty() && !ov_total.empty()) {
+            std::vector<index_t> dedup_old;
+            dedup_old.reserve(ov_total.size());
+            std::size_t i = 0;
+            std::size_t j = 0;
+            while (i < ov_total.size() && j < nv_total.size()) {
+                if (ov_total[i] < nv_total[j]) {
+                    dedup_old.push_back(ov_total[i]);
+                    ++i;
+                } else if (ov_total[i] > nv_total[j]) {
+                    ++j;
+                } else {
+                    ++i; ++j;
+                }
+            }
+            for (; i < ov_total.size(); ++i) {
+                dedup_old.push_back(ov_total[i]);
+            }
+            ov_total = std::move(dedup_old);
+        }
+
+        const std::size_t u = join_pairs_locked(
+            ds, graph, insert_locks, nv_total, ov_total, distance);
+        if (u != 0) {
+            updates.fetch_add(u, std::memory_order_relaxed);
+        }
+    }
+
+    return updates.load(std::memory_order_relaxed);
+}
+
+template std::size_t local_join_omp<L2Squared>(
+    const Dataset&, NnDescentGraph&, int, L2Squared);
+
+template std::size_t local_join_omp<NegativeInnerProduct>(
+    const Dataset&, NnDescentGraph&, int, NegativeInnerProduct);
+
+template std::size_t local_join_with_reverse_omp<L2Squared>(
+    const Dataset&, NnDescentGraph&, int, L2Squared);
+
+template std::size_t local_join_with_reverse_omp<NegativeInnerProduct>(
+    const Dataset&, NnDescentGraph&, int, NegativeInnerProduct);
+
 namespace {
 
 /// The shared driver body used by both `nn_descent` and
@@ -648,14 +907,21 @@ Knng nn_descent_impl(const Dataset& ds,
     const double threshold_updates =
         cfg.delta * denom;  // updates count below which we stop
 
-    // The driver picks one of four kernel variants based on
-    // `(use_reverse, rho < 1.0)`. The `rho < 1.0` branch
-    // computes a per-iteration seed by mixing `cfg.seed` with the
-    // iteration index — the multiplier is the 64-bit
-    // golden-ratio constant used by `splitmix64`-style hashers,
-    // which gives good spread without a full hash.
+    // The driver picks one of six kernel variants based on
+    // `(use_reverse, rho < 1.0, num_threads != 1)`. The
+    // sampling branch computes a per-iteration seed by mixing
+    // `cfg.seed` with the iteration index — the multiplier is
+    // the 64-bit golden-ratio constant used by `splitmix64`-style
+    // hashers, which gives good spread without a full hash.
+    //
+    // Parallelism is *only* applied when `rho == 1.0`. Mixing
+    // sampling with parallelism would require threading a
+    // per-iteration RNG through every worker, which is out of
+    // scope for Step 36; the silent fall-through to serial is
+    // documented in `NnDescentConfig::num_threads`.
     constexpr std::uint64_t kPhi = 0x9E3779B97F4A7C15ULL;
     const bool use_sampling = cfg.rho < 1.0;
+    const bool use_parallel = (cfg.num_threads != 1) && !use_sampling;
 
     for (std::size_t it = 0; it < cfg.max_iters; ++it) {
         std::size_t updates = 0;
@@ -667,6 +933,12 @@ Knng nn_descent_impl(const Dataset& ds,
                       ds, graph, cfg.rho, iter_seed, distance)
                 : local_join_sampled(
                       ds, graph, cfg.rho, iter_seed, distance);
+        } else if (use_parallel) {
+            updates = cfg.use_reverse
+                ? local_join_with_reverse_omp(
+                      ds, graph, cfg.num_threads, distance)
+                : local_join_omp(
+                      ds, graph, cfg.num_threads, distance);
         } else {
             updates = cfg.use_reverse
                 ? local_join_with_reverse(ds, graph, distance)

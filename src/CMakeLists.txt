@@ -22,6 +22,7 @@ set(_knng_cpu_sources
     cpu/distance.cpp
     cpu/distance_simd.cpp
     cpu/neighbor_list.cpp
+    cpu/nn_descent.cpp
     cpu/numa.cpp
 )
 if(KNNG_HAVE_BLAS)

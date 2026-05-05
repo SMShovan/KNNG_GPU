@@ -12,6 +12,149 @@ independent of the code diff.
 
 ---
 
+## [Step 31] — Random graph initialisation (`init_random_graph`) (2026-05-05)
+
+### What
+- Added `include/knng/cpu/nn_descent.hpp` and
+  `src/cpu/nn_descent.cpp` — the public interface for Phase 5's
+  CPU NN-Descent builder. Step 31 contributes:
+  * `class knng::cpu::NnDescentGraph` — `n × k` collection of
+    `NeighborList`s. Owns its storage, has `at(i)` row accessors,
+    `n() / k()` getters, `lists()` for bulk access, and
+    `to_knng()` to flatten into the canonical `knng::Knng`
+    shape. Empty slots in `to_knng` are filled with the
+    `NeighborList::kEmptyId` sentinel and `+inf` distance.
+  * `template <Distance D> NnDescentGraph init_random_graph(
+    Dataset, k, seed, D)` — the random k-NN graph initialiser.
+    Every point gets `k` distinct non-self random neighbours
+    under the supplied distance functor; every entry is flagged
+    `is_new = true`. RNG is `knng::random::XorShift64{seed}`
+    from Step 17 — same `(ds, k, seed)` triple ⇒ bit-identical
+    output across runs across platforms.
+- Sampling strategy: rejection sampling over `[0, n)`. Skip
+  self-matches and duplicates (the duplicate check saves the
+  distance computation; `NeighborList::insert` would have
+  rejected silently anyway). Defensive cap of `4*k + 16`
+  attempts per point so a degenerate input cannot infinite-loop.
+- Explicit instantiations for `L2Squared` and
+  `NegativeInnerProduct` so downstream callers link against
+  pre-compiled symbols.
+- Thirteen new `test_nn_descent` cases pinning the contract:
+  shape, `to_knng` sentinel-fill on partial rows, every entry
+  is non-self / distinct / `is_new = true`, rows sorted
+  ascending, same-seed determinism, different-seed divergence,
+  distances match the underlying metric, `to_knng` round-trip
+  consistency, both built-in metrics compile, `k = 0` /
+  `k > n - 1` / empty-dataset throw `std::invalid_argument`.
+- Wired `cpu/nn_descent.cpp` into `knng_cpu` and
+  `tests/nn_descent_test.cpp` into the CTest matrix (the same
+  TU will accumulate Step-32+ tests).
+- ctest 152/152 green (13 new nn_descent, 139 carried over
+  from Step 30).
+
+### Why
+Random initialisation is NN-Descent's starting condition. Wang
+et al. 2012 §4.1 begins from a random k-NN graph; the
+local-join (Step 32) then refines it iteration after iteration
+until convergence. The choice of *random* (not "approximately
+correct") starting state is deliberate and load-bearing:
+NN-Descent's correctness proof relies on the algorithm being
+able to escape any local optimum the initial graph happens to
+sit in, and a "smart" initialiser (e.g. seed from a coarse
+brute-force on a subset) would actually *slow* convergence
+because it pre-commits to a sub-graph the local-join then has
+to climb out of.
+
+The deterministic-seed property is what every regression test
+in Phase 5+ will rely on. The `same seed → same graph` invariant
+runs all the way down to the bit level: `XorShift64`'s integer
+arithmetic is bit-identical across CPU and (eventually) GPU,
+and the `uniform_below` Lemire trick uses only integer
+operations. When Phase 9's GPU NN-Descent ships, the
+`init_random_graph` test fixture here will be re-asserted on
+device, byte-for-byte.
+
+The `to_knng` conversion exists so the rest of the project can
+treat the NN-Descent output the same way it treats the
+brute-force output. Step 33's recall comparison will compute
+`recall_at_k(g.to_knng(), brute_force_truth)` without caring
+whether the source was the heap-based brute-force builder or
+the iterative refinement builder. The `kEmptyId` /
+`+inf` sentinel for partial rows is the "correct" default for
+that comparison: an unfilled slot cannot recall any neighbour,
+so it correctly contributes zero hits.
+
+The defensive `max_attempts` cap is the kind of bug-prevention
+that costs nothing and saves a 3-AM debugging session. NN-Descent
+literature occasionally shows code that loops forever on
+pathological inputs (typically `n ≈ k` cases not covered by
+the input validation); pinning a bound that is generous in
+expectation but finite in pathology is the right shape.
+
+### Tradeoff
+- **Rejection sampling, not Floyd's algorithm.** Floyd's
+  algorithm samples `k` distinct values from `[0, n)` in
+  exactly `O(k)` time without rejection. We use rejection
+  sampling because `k ≪ n` for every realistic input and the
+  expected attempts per slot are <2; the simpler code reads
+  more like the algorithm's literature (which always
+  describes "draw a random neighbour, retry if duplicate").
+  Future profiling can swap the implementation if it ever
+  shows up as a bottleneck.
+- **Distance functor is templated.** Mirrors the
+  `brute_force_knn` shape; consumers that prefer the runtime
+  dispatch (CLI, future Python bindings) will go through a
+  thin `MetricId`-keyed wrapper. The two built-in functors
+  are explicitly instantiated; user-supplied `Distance` types
+  pay the per-TU instantiation cost at the call site, which
+  is the right tradeoff for a research codebase.
+- **`NnDescentGraph::lists()` exposes the underlying vector
+  directly.** A future contributor could reach in and
+  invalidate the per-row capacity invariant; we accept the
+  exposure because the local-join kernel needs raw bulk
+  access and a "safer" iterator-pair abstraction would just
+  move the problem one level deeper.
+- **Construction allocates `n` `NeighborList`s.** For SIFT1M
+  with `k = 20`, this is ~1M empty vectors — each holding a
+  reserved `Neighbor[k]` capacity of ~240 bytes — totalling
+  ~240 MB of empty pre-allocated headroom. This is the
+  canonical NN-Descent storage and matches what every
+  production implementation does; we accept the
+  pre-allocation as the steady-state cost of the algorithm.
+
+### Learning
+- *Determinism in a random algorithm is a feature, not a
+  contradiction.* `init_random_graph` is "random" in the sense
+  that the output is not algorithmically pre-determined by the
+  input, but it is *fully determined* by the `(ds, k, seed)`
+  triple. Every Phase-5 test fixture relies on this property —
+  the unit tests are not "approximately correct"; they pin the
+  exact graph the algorithm produces under the exact seed.
+- *The duplicate check before the distance call is a real
+  optimisation.* Without it, the rejection-sampling loop would
+  call `distance(...)` on every duplicate id (a few percent
+  of attempts) only to have `NeighborList::insert` silently
+  drop the result. With it, the duplicate path costs one
+  linear scan over `k ≤ 50` entries — far cheaper than an
+  `O(d)` distance computation.
+- *Sentinel-fill in `to_knng` is the cleaner contract.* An
+  earlier draft trimmed the output `Knng`'s `k` to the
+  minimum-row size, but that broke the
+  `recall_at_k(approx, truth)` shape contract (Step 15
+  requires `approx.k == truth.k`). Returning a
+  `(n × k)` graph with sentinel-filled empty slots keeps the
+  shape stable and lets `recall_at_k` correctly score them as
+  "missed."
+
+### Next
+- Step 32: the local-join kernel. For each point `p`, for each
+  pair of neighbours `(u, v)` of `p` where at least one is
+  `is_new`, compute `d(u, v)` and try to insert into both
+  lists. Single-threaded for now; the `is_new` flag from
+  Step 30 is the redundancy filter that makes this tractable.
+
+---
+
 ## [Step 30] — `Neighbor` + `NeighborList` types (2026-05-05)
 
 ### What

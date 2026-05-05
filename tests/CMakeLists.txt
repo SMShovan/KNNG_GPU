@@ -221,3 +221,24 @@ gtest_discover_tests(test_neighbor_list
         LABELS "neighbor_list"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_nn_descent` exercises the CPU NN-Descent surface across
+# Phase 5 — Step 31 covers the random-graph initialiser; later
+# steps append more cases to the same TU.
+add_executable(test_nn_descent nn_descent_test.cpp)
+target_link_libraries(test_nn_descent
+    PRIVATE
+        knng::cpu
+        GTest::gtest_main
+)
+knng_set_warnings(test_nn_descent)
+
+set_target_properties(test_nn_descent PROPERTIES
+    OUTPUT_NAME "test_nn_descent"
+)
+
+gtest_discover_tests(test_nn_descent
+    PROPERTIES
+        LABELS "nn_descent"
+    DISCOVERY_TIMEOUT 10
+)

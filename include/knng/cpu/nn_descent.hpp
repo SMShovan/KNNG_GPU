@@ -218,6 +218,57 @@ template <Distance D>
     NnDescentGraph& graph,
     D distance = D{});
 
+/// Sampled variant of `local_join` (Step 35).
+///
+/// Same algorithm as plain `local_join`, but each point's
+/// per-iteration candidate set is *subsampled* to roughly
+/// `rho * k` entries before the pair-enumeration runs. Sampling
+/// is uniform without replacement, drawn via
+/// `knng::random::XorShift64{iter_seed}` so output is
+/// deterministic for a given `(ds, graph, rho, iter_seed)` tuple.
+///
+/// Crucially, the snapshot-and-age phase only flips sampled
+/// entries to `is_new = false`. Unsampled entries remain
+/// `is_new = true` and are eligible for sampling in subsequent
+/// iterations. This matches Wang et al. 2012 §4.4: sampling
+/// trades per-iteration work for *more* iterations, but the
+/// graph still converges because every entry is eventually
+/// processed.
+///
+/// `rho = 1.0` is equivalent to `local_join` modulo RNG
+/// state — the function still walks the sampler so the seed
+/// argument is required, but no candidates are dropped.
+///
+/// @param rho Sampling rate in `(0.0, 1.0]`. Common bench
+///        values: `0.3`, `0.5`, `1.0` (the latter being "no
+///        sampling"). `rho ≤ 0.0` throws.
+/// @param iter_seed Per-iteration RNG seed. The driver mixes
+///        `cfg.seed` with the iteration index so successive
+///        iterations sample different subsets.
+template <Distance D>
+[[nodiscard]] std::size_t local_join_sampled(
+    const Dataset& ds,
+    NnDescentGraph& graph,
+    double rho,
+    std::uint64_t iter_seed,
+    D distance = D{});
+
+/// Sampled variant of `local_join_with_reverse` (Step 35). The
+/// forward / reverse / sample / merge / dedup pipeline from
+/// Step 34 is preserved; the only change is the snapshot phase
+/// downsamples each point's `new` and `old` sets to roughly
+/// `rho * k` entries (and only flips the sampled ones to
+/// `is_new = false`). Reverse-list construction then operates on
+/// the sampled snapshot, so the reverse-augmented union is also
+/// proportionally smaller.
+template <Distance D>
+[[nodiscard]] std::size_t local_join_with_reverse_sampled(
+    const Dataset& ds,
+    NnDescentGraph& graph,
+    double rho,
+    std::uint64_t iter_seed,
+    D distance = D{});
+
 /// Tunable knobs for the convergence-driven NN-Descent driver.
 struct NnDescentConfig {
     /// Hard cap on iterations. The convergence criterion is the
@@ -252,6 +303,19 @@ struct NnDescentConfig {
     /// them off is rarely the right call but is supported for
     /// pedagogy and ablation studies.
     bool use_reverse = true;
+
+    /// Sampling rate `rho` for the local-join candidate set
+    /// (Step 35). At `rho = 1.0` (default) every entry in each
+    /// point's `new` / `old` snapshot is processed every
+    /// iteration. At `rho < 1.0` the snapshot is uniformly
+    /// downsampled to roughly `rho * k` entries; the unsampled
+    /// entries remain `is_new = true` for the next iteration's
+    /// chance at the lottery. Trades per-iteration work for
+    /// more iterations; the recall-vs-time curve is empirically
+    /// flat between `rho = 0.3` and `rho = 1.0` on SIFT1M-class
+    /// datasets, so the *right* default is "no sampling" and
+    /// the knob exists for ablation. `rho ≤ 0.0` throws.
+    double rho = 1.0;
 };
 
 /// Per-iteration statistics emitted by `nn_descent_with_log`. The

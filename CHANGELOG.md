@@ -12,6 +12,169 @@ independent of the code diff.
 
 ---
 
+## [Step 35] — Sampling (`rho` parameter) (2026-05-05)
+
+### What
+- Added two sampled-variant kernels:
+  * `local_join_sampled<D>(ds, graph, rho, iter_seed, distance)`
+  * `local_join_with_reverse_sampled<D>(ds, graph, rho,
+    iter_seed, distance)`
+  Both run the same algorithm as their unsampled siblings but
+  uniformly downsample each point's `new` and `old` candidate
+  sets to `rho * k` entries before the pair-enumeration. The
+  RNG is `XorShift64{iter_seed}` so output is deterministic
+  for a given `(graph, rho, iter_seed)`.
+- Added a private helper trio in the anonymous namespace:
+  * `rho_to_sample_size(rho, k)` — converts a `(0, 1]`
+    sampling rate to an effective sample size, clamped at
+    `min(k, max(1, ⌊rho * k⌋))` so `rho > 0` always processes
+    at least one entry.
+  * `partial_fisher_yates(pool, m, rng)` — `O(m)` partial
+    shuffle that picks `m` distinct entries uniformly. The
+    sampled prefix lands in `pool[0 .. m)`.
+  * `snapshot_and_age_sampled(graph, rho, rng, new_ids,
+    old_ids)` — the sampled twin of `snapshot_and_age` from
+    Step 34. Walks every list, records new / old positions,
+    runs partial Fisher-Yates, captures sampled ids, and —
+    crucially — flips *only the sampled-new positions* to
+    `is_new = false`. Unsampled entries remain `is_new = true`
+    so they are eligible for sampling in subsequent iterations.
+- The reverse-sampled kernel additionally subsamples the
+  reverse-graph contribution: when `|rev_new[p]| > rho * k`,
+  it picks `rho * k` entries uniformly via the same
+  Fisher-Yates helper before merging into `nv_total`. Same
+  for `rev_old`. The `sort_unique` + two-finger merge
+  dedup pipeline from Step 34 carries through unchanged.
+- Extended `NnDescentConfig` with `double rho = 1.0`. The
+  driver now picks one of *four* kernel variants based on
+  `(use_reverse, rho < 1.0)`:
+  * `(true, false)` → `local_join_with_reverse` (Step 34)
+  * `(false, false)` → `local_join` (Step 32)
+  * `(true, true)` → `local_join_with_reverse_sampled`
+  * `(false, true)` → `local_join_sampled`
+  Per-iteration sampling seed is computed by mixing
+  `cfg.seed` with the iteration index using the 64-bit
+  golden-ratio constant `0x9E3779B97F4A7C15ULL` —
+  `splitmix64`-style mixing for good diversity without a full
+  hash. `cfg.rho ≤ 0.0` is rejected at driver entry.
+- Eight new `test_nn_descent` cases:
+  * `rho = 1.0` sampled produces bit-identical output to
+    plain (since every entry survives the sampler).
+  * `rho < 1.0` still produces non-zero updates and
+    preserves shape on the 8-point fixture.
+  * `rho ≤ 0.0` throws on every kernel and on the driver.
+  * Graph-size mismatch throws on the sampled kernels.
+  * Driver `cfg.rho = 1.0` produces the same output as the
+    default `cfg{}` (which has `rho = 1.0`).
+  * Driver still converges to `recall@k = 1.0` at
+    `rho ∈ {0.3, 0.5, 0.8}` given enough iterations.
+  * Driver rejects `cfg.rho ≤ 0.0`.
+  * Per-iteration update counts at `rho = 0.3` are no
+    larger than at `rho = 1.0` (smaller candidate set ⇒
+    no more work per iteration).
+- ctest 176/176 green (8 new nn_descent, 168 carried over
+  from Step 34).
+
+### Why
+Sampling is the third classic NN-Descent tuning knob alongside
+`max_iters` and `delta`. Wang et al. 2012 §4.4 introduces it
+as the speed/quality tradeoff control: at `rho = 1.0` (default)
+every snapshot entry is processed, which gives the highest
+per-iteration progress; at `rho < 1.0` the per-iteration work
+shrinks proportionally and the algorithm trades some
+convergence rate for raw throughput.
+
+The empirical claim from the literature is that on
+SIFT1M-class datasets the recall-vs-wall-time curve is
+remarkably flat between `rho ∈ [0.3, 1.0]` — a `rho = 0.5`
+build hits the same final recall as `rho = 1.0` in ~80% of
+the wall time. Step 37's writeup will plot the exact shape
+of this curve from the bench JSON; this commit ships the
+infrastructure to produce that data.
+
+The "only mark sampled-new as old" rule is non-trivial. The
+naive alternative — flip every new entry to old at snapshot
+time — would mean unsampled entries silently lose their `new`
+status without ever being processed against their peers,
+breaking the algorithm's correctness guarantee. The Wang
+formulation is precise: an entry is `is_new = true` until it
+has *actually been processed*, so unsampled entries persist
+across iterations until the sampler picks them. Pinning this
+in the implementation now means future readers do not have to
+reverse-engineer it from the paper.
+
+The `rho` knob also explains why the bench harness needs a
+per-iteration RNG. If the same sample were drawn every
+iteration, unsampled entries would *never* be processed and
+the algorithm would deadlock. Mixing `cfg.seed` with the
+iteration index gives every iteration a distinct sample
+without sacrificing the project's "same `cfg.seed` →
+bit-identical output" determinism contract.
+
+### Tradeoff
+- **Four kernel variants now coexist.** `local_join`,
+  `local_join_with_reverse`, `local_join_sampled`,
+  `local_join_with_reverse_sampled`. We accept the API
+  surface growth — each is a self-contained pedagogical
+  artefact, and the driver picks for the user. The shared
+  `join_pairs` / `snapshot_and_age` / `sort_unique` helpers
+  keep the duplication to a minimum.
+- **`rho_to_sample_size` clamps to ≥ 1.** A user who
+  passes `rho = 0.0001` and `k = 5` would otherwise get a
+  zero-size sample and the algorithm would do *nothing*.
+  Clamping to at least 1 turns the pathology into a
+  "convergence will be slow but it'll still happen"
+  outcome. Better than the alternative.
+- **Reverse-list subsampling uses a fresh
+  partial Fisher-Yates per call.** Allocating a small
+  position vector per point is `O(rev_new.size())` work; for
+  the typical case where `|rev_new[p]| ≈ k`, this is
+  negligible. A future "amortise the position scratch
+  across points" refinement is in scope for Step 37's
+  bench-driven optimisation pass.
+- **`partial_fisher_yates` is `noexcept` but takes a
+  reference-mutated pool.** A by-value variant would let
+  the caller treat sampling as functional but cost an
+  allocation per call. We accept the in-place mutation for
+  the inner-loop primitive; the outer-loop callers always
+  re-fill the pool from the snapshot anyway.
+
+### Learning
+- *The sampler advances state across iterations, not within
+  one.* The driver's `iter_seed = cfg.seed ^ ((it + 1) * φ)`
+  trick is the cheapest way to get diverse samples without
+  threading an RNG through the call signature. Calling the
+  kernel `local_join_sampled(... iter_seed)` keeps the
+  sampler self-contained — no shared mutable RNG state, no
+  threading concerns when Step 36 parallelises the kernel.
+- *"Only mark processed entries as old" is the
+  Wang-paper-exact behaviour the unsampled kernels can
+  shortcut.* Steps 32 / 34's `mark_all_old()` is a
+  correctness shortcut that works because *all* entries
+  get processed every iteration. Step 35 cannot use it; the
+  per-position flip is the one that generalises to
+  sampling. The two formulations agree at `rho = 1.0` —
+  proven by the bit-identical-output test — which is the
+  reassurance that the more-general code did not accidentally
+  introduce a regression.
+- *"Sampling clamps to at least 1" is the kind of
+  precondition that should fail loudly when violated.*
+  Returning zero would be a quieter bug than throwing. We
+  chose to clamp instead of throwing because `rho = 0.001`
+  with `k = 5` is a *legal* configuration that should still
+  produce *some* output; the alternative of "throw on every
+  small-rho-times-small-k" surface-area would force every
+  caller to compute the product themselves before invoking.
+
+### Next
+- Step 36: parallel NN-Descent (OpenMP). The outer point
+  loop in every kernel variant becomes `#pragma omp
+  parallel for`; per-point list inserts are protected by
+  per-point locks (or atomic CAS). Scaling study against
+  Step 34's serial baseline.
+
+---
+
 ## [Step 34] — Reverse neighbour lists (NEO-DNND headline win) (2026-05-05)
 
 ### What

@@ -547,4 +547,164 @@ TEST(LocalJoinWithReverse, GraphSizeMismatchThrows)
         std::invalid_argument);
 }
 
+// --- sampled variants (Step 35) -------------------------------------
+
+TEST(LocalJoinSampled, RhoOneFullSampleIsEquivalentToPlain)
+{
+    // At rho=1.0 the sampled variant should produce exactly the
+    // same graph as plain `local_join` because no candidates are
+    // dropped. The seed argument is unused at full rate.
+    const auto ds = two_clusters_eight_points();
+    auto g_plain   = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+    auto g_sampled = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    (void)knng::cpu::local_join(ds, g_plain, knng::L2Squared{});
+    (void)knng::cpu::local_join_sampled(
+        ds, g_sampled, /*rho=*/1.0, /*iter_seed=*/123,
+        knng::L2Squared{});
+
+    for (std::size_t p = 0; p < g_plain.n(); ++p) {
+        const auto a = g_plain.at(p).view();
+        const auto b = g_sampled.at(p).view();
+        ASSERT_EQ(a.size(), b.size()) << "row " << p;
+        for (std::size_t j = 0; j < a.size(); ++j) {
+            EXPECT_EQ(a[j].id, b[j].id) << "row " << p << " col " << j;
+            EXPECT_FLOAT_EQ(a[j].dist, b[j].dist);
+        }
+    }
+}
+
+TEST(LocalJoinSampled, RhoLessThanOneStillProducesUpdates)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{4}, std::uint64_t{42}, knng::L2Squared{});
+    const auto u = knng::cpu::local_join_sampled(
+        ds, g, /*rho=*/0.5, /*iter_seed=*/7, knng::L2Squared{});
+    EXPECT_GT(u, std::size_t{0});
+    EXPECT_EQ(g.n(), ds.n);
+    for (std::size_t p = 0; p < g.n(); ++p) {
+        EXPECT_EQ(g.at(p).size(), std::size_t{4});
+    }
+}
+
+TEST(LocalJoinSampled, ZeroOrNegativeRhoThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_sampled(
+            ds, g, /*rho=*/0.0, 1, knng::L2Squared{}); },
+        std::invalid_argument);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_sampled(
+            ds, g, /*rho=*/-0.5, 1, knng::L2Squared{}); },
+        std::invalid_argument);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_with_reverse_sampled(
+            ds, g, /*rho=*/0.0, 1, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
+TEST(LocalJoinSampled, GraphSizeMismatchThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentGraph wrong(ds.n + 1, 3);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_sampled(
+            ds, wrong, 0.5, 1, knng::L2Squared{}); },
+        std::invalid_argument);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_with_reverse_sampled(
+            ds, wrong, 0.5, 1, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
+TEST(NnDescent, RhoOneRouteMatchesPlainConfig)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg_a{};
+    knng::cpu::NnDescentConfig cfg_b{};
+    cfg_b.rho = 1.0;
+    const auto a = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg_a, knng::L2Squared{});
+    const auto b = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg_b, knng::L2Squared{});
+    EXPECT_EQ(a.neighbors, b.neighbors);
+}
+
+TEST(NnDescent, RhoLessThanOneStillReachesConvergence)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+
+    for (double rho : {0.3, 0.5, 0.8}) {
+        knng::cpu::NnDescentConfig cfg{};
+        cfg.max_iters = 32;
+        cfg.delta     = 0.0;
+        cfg.rho       = rho;
+        const auto g = knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{});
+        const double recall = knng::bench::recall_at_k(g, truth);
+        EXPECT_DOUBLE_EQ(recall, 1.0)
+            << "rho = " << rho;
+    }
+}
+
+TEST(NnDescent, NonPositiveRhoThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg{};
+    cfg.rho = 0.0;
+    EXPECT_THROW(
+        { (void)knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{}); },
+        std::invalid_argument);
+    cfg.rho = -0.1;
+    EXPECT_THROW(
+        { (void)knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
+TEST(NnDescent, RhoSweepOnLogShowsDecreasingPerIterWork)
+{
+    // Ablation knob sanity check: at rho=0.3 the per-iteration
+    // update count *averaged* across a run should be lower than
+    // at rho=1.0 (less candidate set means less work). We
+    // compare iteration-1 update counts; the smaller candidate
+    // set produces at most as much work per iteration.
+    const auto ds = two_clusters_eight_points();
+
+    knng::cpu::NnDescentConfig cfg_full{};
+    cfg_full.max_iters = 1;
+    cfg_full.delta     = 0.0;
+    cfg_full.rho       = 1.0;
+
+    knng::cpu::NnDescentConfig cfg_small{};
+    cfg_small.max_iters = 1;
+    cfg_small.delta     = 0.0;
+    cfg_small.rho       = 0.3;
+
+    std::vector<knng::cpu::NnDescentIterationLog> log_full;
+    std::vector<knng::cpu::NnDescentIterationLog> log_small;
+    (void)knng::cpu::nn_descent_with_log(
+        ds, std::size_t{4}, cfg_full, log_full,
+        knng::L2Squared{});
+    (void)knng::cpu::nn_descent_with_log(
+        ds, std::size_t{4}, cfg_small, log_small,
+        knng::L2Squared{});
+
+    ASSERT_EQ(log_full.size(), std::size_t{1});
+    ASSERT_EQ(log_small.size(), std::size_t{1});
+    // Strict-less is the typical case; equality is possible on a
+    // tiny fixture where the sample happens to cover every
+    // candidate, so the bound is `≤`.
+    EXPECT_LE(log_small[0].updates, log_full[0].updates);
+}
+
 } // namespace

@@ -12,6 +12,147 @@ independent of the code diff.
 
 ---
 
+## [Step 30] — `Neighbor` + `NeighborList` types (2026-05-05)
+
+### What
+- Added `include/knng/cpu/neighbor_list.hpp` and
+  `src/cpu/neighbor_list.cpp` — the per-point neighbour list
+  every NN-Descent iteration mutates. Two public types in this
+  step:
+  * `struct knng::Neighbor { index_t id; float dist; bool is_new; }`
+    — the entry shape. The `is_new` flag is the algorithmic
+    redundancy filter that turns NN-Descent's local-join from
+    pairwise-everything into "consider only `(u, v)` pairs
+    where at least one is new since the last iteration."
+  * `class knng::cpu::NeighborList` — bounded-size,
+    sorted-ascending-by-distance container with capacity `k`.
+    Public surface: `insert(id, dist, is_new) → bool`,
+    `contains(id)`, `mark_all_old()`, `view()`, `size()`,
+    `capacity()`, `empty()`, `full()`, `worst_dist()`. Tie-break
+    matches `TopK` (Step 09): equal distances ordered by
+    ascending neighbour id, so output is deterministic without
+    an RNG.
+- `insert` returns `true` when the list's contents change. The
+  bool is what Step 33's convergence check counts:
+  `n_updates += list.insert(...) ? 1 : 0` summed across every
+  list, divided by `n*k` to get the per-iteration update fraction.
+- Duplicate-id semantics are explicit: an existing entry with a
+  smaller distance wins; an existing entry with a larger
+  distance is replaced (and inherits the new `is_new` flag, so
+  a re-insertion with `is_new=true` re-activates a previously
+  processed neighbour for the next iteration).
+- Twelve new `test_neighbor_list` cases pinning the contract:
+  fresh-construction empty, below-capacity insertion order, tie-
+  break by ascending id, capacity eviction (worst goes;
+  re-tested under tied-distance), duplicate-with-worse-dist
+  ignored, duplicate-with-better-dist replaces, `mark_all_old`
+  flips every flag, `contains` linear scan, `k = 0` rejects
+  every insert and reports `full()` (degenerate-but-coherent),
+  `worst_dist` tracking under inserts and evictions,
+  newly-inserted-after-`mark_all_old` is again `is_new`.
+- Wired `cpu/neighbor_list.cpp` into `knng_cpu` and
+  `tests/neighbor_list_test.cpp` into the CTest matrix.
+- ctest 139/139 green (12 new neighbor_list, 127 carried
+  over from Step 29).
+
+### Why
+Phase 5's pivot from brute-force to NN-Descent rests on one
+constant-factor optimisation: only consider `(u, v)` neighbour
+pairs where at least one is "new" — i.e. has been inserted or
+modified since the previous iteration. Without the `is_new`
+flag, the local-join would re-examine every pair every
+iteration; with it, the per-iteration work shrinks
+monotonically as the graph stabilises and convergence becomes
+the natural stopping condition. This is the single most
+important constant-factor optimisation NN-Descent ships, and
+it is referenced directly in Wang et al. 2012 §4.1 and the
+NEO-DNND paper §3.1.
+
+The container is a flat `std::vector<Neighbor>` rather than a
+`std::set` / `std::priority_queue` / hash map for one decisive
+reason: at the `k = 10..50` sizes NN-Descent runs on, a linear
+scan beats every smarter data structure by both constant
+factor (no allocator overhead per insert; cache-friendly) and
+code-line count (the algorithm is two lines of `std::lower_bound`
+plus an `erase` / `insert`). The same trick `TopK` (Step 09)
+ships, applied to the slightly richer "neighbour with flag"
+type.
+
+The `worst_dist()` accessor is what Step 32's local-join uses
+for early rejection: if a candidate's tentative distance is
+already worse than `list.worst_dist()`, the list cannot
+benefit from it and the insertion call is skipped — saving the
+linear-scan duplicate-check on every call.
+
+`insert` returning `bool` is the convergence-counting hook the
+plan calls out in Step 33. We pin the semantics here so a
+future caller does not need to look at the implementation to
+know what "did the list change?" means: a duplicate-with-
+worse-dist returns `false` (no contents change); a
+duplicate-with-better-dist returns `true` (distance and flag
+both updated); an insertion below capacity always returns
+`true`; a successful eviction-and-insert returns `true`; a
+rejected-because-worse returns `false`.
+
+### Tradeoff
+- **Linear scan for both `contains` and the duplicate check.**
+  At `k = 50` this is ~25 comparisons per insert in the worst
+  case — utterly negligible next to the per-pair distance
+  computation (`O(d)` floats, typically `d = 128–960`). At
+  larger `k` (the regime where ANN benchmarks rarely operate)
+  a hash-of-ids would help; we will not add it speculatively.
+- **`mark_all_old` is `O(k)` per call.** A bit-mask shadow
+  array would make it `O(1)` (one `std::fill`), but a
+  `std::vector<bool>` introduces aliasing concerns with the
+  `Neighbor::is_new` field's natural location. We accept the
+  `O(k)` cost — `mark_all_old` is called once per point per
+  iteration, dwarfed by the `O(k²)` local-join work that
+  follows.
+- **Duplicate handling does an `erase` + reinsert on the
+  better-distance path.** This is `O(k)` because of the
+  vector shift; an in-place update + `std::sort` of the
+  affected range would be slightly faster but more code.
+  We accept the simpler path; future profiling can revisit
+  if it shows up as a hot block.
+- **`Neighbor` is 12 bytes (4 + 4 + 1 + 3 padding).** A
+  packed `uint32_t id_and_flag` could shave the bool into the
+  high bit of `id`, saving 4 bytes per entry. We accept the
+  natural layout — at `k = 50` the per-list footprint is
+  ~600 bytes, and removing the padding would force every
+  consumer to mask off the flag bit. The simplicity is worth
+  it.
+
+### Learning
+- *The smallest data structure that supports the algorithm is
+  the right one.* The temptation in NN-Descent literature is
+  to read about Wang et al.'s "neighbour list with flags" and
+  imagine something elaborate; the actual minimal
+  implementation is one struct + one class + 200 lines of
+  code. Pinning that minimum here, before the algorithm
+  arrives, makes Step 32's local-join read as "consume this
+  type" rather than "invent a type *and* the algorithm at
+  once."
+- *Returning `bool` from `insert` is the cheapest
+  convergence-counter integration.* The alternative — having
+  Step 33 inspect the list state before and after — would
+  force every caller to remember which fields constitute a
+  "change." `insert`'s return value is the canonical answer,
+  and Step 33 is one `+=` per call.
+- *`is_new` is per-entry, not per-list.* An earlier draft
+  considered a single "list-level new flag" that flipped to
+  false after one iteration. That would have been wrong:
+  freshly-inserted entries during an iteration must be
+  individually trackable as new for the *next* iteration's
+  local-join. The per-entry flag is the only correct shape.
+
+### Next
+- Step 31: `init_random_graph(Dataset, k, seed)`. Every point
+  gets `k` random neighbours, all marked `is_new = true`. This
+  consumes `NeighborList` from this step and produces the
+  initial graph state Step 32's local-join will refine.
+
+---
+
 ## [Step 29] — CPU scaling writeup (2026-05-04)
 
 ### What

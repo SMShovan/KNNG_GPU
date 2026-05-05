@@ -200,3 +200,24 @@ gtest_discover_tests(test_numa
         LABELS "numa"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_neighbor_list` exercises the per-point sorted neighbour
+# list (Step 30) — sorted invariant, tie-break, eviction, duplicate
+# handling, is_new accounting.
+add_executable(test_neighbor_list neighbor_list_test.cpp)
+target_link_libraries(test_neighbor_list
+    PRIVATE
+        knng::cpu
+        GTest::gtest_main
+)
+knng_set_warnings(test_neighbor_list)
+
+set_target_properties(test_neighbor_list PROPERTIES
+    OUTPUT_NAME "test_neighbor_list"
+)
+
+gtest_discover_tests(test_neighbor_list
+    PROPERTIES
+        LABELS "neighbor_list"
+    DISCOVERY_TIMEOUT 10
+)

@@ -224,4 +224,94 @@ template std::size_t local_join<L2Squared>(
 template std::size_t local_join<NegativeInnerProduct>(
     const Dataset&, NnDescentGraph&, NegativeInnerProduct);
 
+namespace {
+
+/// The shared driver body used by both `nn_descent` and
+/// `nn_descent_with_log`. `log_out` is optional — when non-null,
+/// the function appends one entry per iteration run.
+template <Distance D>
+Knng nn_descent_impl(const Dataset& ds,
+                      std::size_t k,
+                      const NnDescentConfig& cfg,
+                      D distance,
+                      std::vector<NnDescentIterationLog>* log_out)
+{
+    if (cfg.delta < 0.0) {
+        throw std::invalid_argument(
+            "knng::cpu::nn_descent: cfg.delta must be non-negative");
+    }
+    // `init_random_graph` validates `(ds, k)`; further checks not
+    // needed here.
+
+    NnDescentGraph graph =
+        init_random_graph(ds, k, cfg.seed, distance);
+
+    if (log_out != nullptr) {
+        log_out->clear();
+        log_out->reserve(cfg.max_iters);
+    }
+
+    const double denom = static_cast<double>(ds.n)
+                       * static_cast<double>(k);
+    const double threshold_updates =
+        cfg.delta * denom;  // updates count below which we stop
+
+    for (std::size_t it = 0; it < cfg.max_iters; ++it) {
+        const std::size_t updates = local_join(ds, graph, distance);
+        const double fraction = (denom > 0.0)
+            ? static_cast<double>(updates) / denom
+            : 0.0;
+        if (log_out != nullptr) {
+            log_out->push_back({it + 1, updates, fraction});
+        }
+        // Stop when the absolute update count drops below the
+        // configured threshold. Comparing against the *count*
+        // rather than the *fraction* avoids a redundant
+        // floating-point op per iteration; the two are equivalent
+        // because `denom > 0`.
+        if (static_cast<double>(updates) < threshold_updates) {
+            break;
+        }
+    }
+
+    return graph.to_knng();
+}
+
+} // namespace
+
+template <Distance D>
+Knng nn_descent(const Dataset& ds,
+                 std::size_t k,
+                 const NnDescentConfig& cfg,
+                 D distance)
+{
+    return nn_descent_impl(ds, k, cfg, distance, nullptr);
+}
+
+template <Distance D>
+Knng nn_descent_with_log(
+    const Dataset& ds,
+    std::size_t k,
+    const NnDescentConfig& cfg,
+    std::vector<NnDescentIterationLog>& log_out,
+    D distance)
+{
+    return nn_descent_impl(ds, k, cfg, distance, &log_out);
+}
+
+template Knng nn_descent<L2Squared>(
+    const Dataset&, std::size_t, const NnDescentConfig&, L2Squared);
+
+template Knng nn_descent<NegativeInnerProduct>(
+    const Dataset&, std::size_t, const NnDescentConfig&,
+    NegativeInnerProduct);
+
+template Knng nn_descent_with_log<L2Squared>(
+    const Dataset&, std::size_t, const NnDescentConfig&,
+    std::vector<NnDescentIterationLog>&, L2Squared);
+
+template Knng nn_descent_with_log<NegativeInnerProduct>(
+    const Dataset&, std::size_t, const NnDescentConfig&,
+    std::vector<NnDescentIterationLog>&, NegativeInnerProduct);
+
 } // namespace knng::cpu

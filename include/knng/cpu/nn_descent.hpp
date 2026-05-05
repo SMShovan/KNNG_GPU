@@ -174,4 +174,72 @@ template <Distance D>
                                      NnDescentGraph& graph,
                                      D distance = D{});
 
+/// Tunable knobs for the convergence-driven NN-Descent driver.
+struct NnDescentConfig {
+    /// Hard cap on iterations. The convergence criterion is the
+    /// usual stopping condition; `max_iters` is the safety bound
+    /// that prevents an unstable input from spinning forever.
+    /// Default `50` is generous — typical SIFT1M-scale runs
+    /// converge in 10–15 iterations.
+    std::size_t max_iters = 50;
+
+    /// Convergence threshold on the per-iteration update fraction
+    /// `n_updates / (n * k)`. Below this, the graph is declared
+    /// stable and the driver returns. Default `0.001` matches
+    /// Wang et al. 2012 §4.1; it corresponds to "fewer than 0.1%
+    /// of the total `(n*k)` neighbour slots changed in the last
+    /// iteration."
+    ///
+    /// Smaller `delta` → tighter convergence → higher recall at
+    /// the cost of more iterations. Larger `delta` → looser
+    /// convergence → lower recall but faster build. The
+    /// recall@k vs `delta` curve is approximately monotone, with
+    /// diminishing returns below ~0.001.
+    double delta = 0.001;
+
+    /// RNG seed for `init_random_graph` (passed straight through).
+    /// Same seed → bit-identical output graph; the driver never
+    /// introduces additional randomness beyond initialisation.
+    std::uint64_t seed = 42;
+};
+
+/// Per-iteration statistics emitted by `nn_descent_with_log`. The
+/// shape is what the bench harness JSON wants to consume: a list
+/// of `(iteration, updates, update_fraction)` rows that captures
+/// the convergence curve for plotting.
+struct NnDescentIterationLog {
+    std::size_t iteration;        ///< 1-based iteration index.
+    std::size_t updates;          ///< `local_join` return value.
+    double      update_fraction;  ///< `updates / (n * k)`.
+};
+
+/// Run NN-Descent to convergence and return the resulting
+/// `(n × k)` `Knng`. Wraps `init_random_graph` + iterated
+/// `local_join` with the configured stopping rule.
+///
+/// @param ds Reference dataset. Must be contiguous.
+/// @param k Per-point neighbour count.
+/// @param cfg Tuning knobs (`max_iters`, `delta`, `seed`).
+/// @param distance Distance functor.
+/// @return Final `Knng`. Rows sorted ascending by distance.
+template <Distance D>
+[[nodiscard]] Knng nn_descent(const Dataset& ds,
+                              std::size_t k,
+                              const NnDescentConfig& cfg = {},
+                              D distance = D{});
+
+/// Same as `nn_descent` but additionally writes a per-iteration
+/// log to `log_out`. The vector is `clear()`-ed first; on return
+/// it has one entry per iteration actually run (so its size is
+/// `≤ cfg.max_iters`). Intended for the bench harness's
+/// "convergence curve" JSON output and for tests that want to
+/// pin `iterations_run`.
+template <Distance D>
+[[nodiscard]] Knng nn_descent_with_log(
+    const Dataset& ds,
+    std::size_t k,
+    const NnDescentConfig& cfg,
+    std::vector<NnDescentIterationLog>& log_out,
+    D distance = D{});
+
 } // namespace knng::cpu

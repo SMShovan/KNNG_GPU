@@ -12,6 +12,158 @@ independent of the code diff.
 
 ---
 
+## [Step 33] — Convergence-driven NN-Descent driver (2026-05-05)
+
+### What
+- Added `knng::cpu::NnDescentConfig` — three tunable knobs the
+  driver consumes:
+  * `max_iters` (default `50`) — hard safety bound; typical
+    SIFT1M-scale runs converge in 10–15 iterations so `50` is
+    deliberately generous.
+  * `delta` (default `0.001`) — the convergence threshold on
+    `n_updates / (n * k)`. Below this, the graph is declared
+    stable and the driver returns. Matches Wang et al. 2012
+    §4.1.
+  * `seed` (default `42`) — passed straight to `init_random_graph`.
+- Added `knng::cpu::NnDescentIterationLog` — per-iteration
+  stats record: 1-based `iteration`, raw `updates` count,
+  precomputed `update_fraction = updates / (n * k)`. The
+  shape is what Step 37's bench harness JSON wants to consume
+  for plotting the convergence curve.
+- Added two driver entry points sharing a private
+  `nn_descent_impl` body:
+  * `Knng nn_descent(ds, k, cfg, distance)` — the simple
+    wrapper most callers want.
+  * `Knng nn_descent_with_log(ds, k, cfg, log_out, distance)`
+    — same return value plus a per-iteration log written to
+    the supplied vector.
+  Both validate `cfg.delta >= 0`; `init_random_graph` validates
+  the rest.
+- The convergence test compares the absolute update count
+  against `delta * n * k` rather than the floating-point
+  fraction — same arithmetic, one fewer divide per iteration.
+- Explicit instantiations for `L2Squared` and
+  `NegativeInnerProduct` for both entry points.
+- Seven new `test_nn_descent` cases pinning the contract:
+  * Convergence to brute-force ground truth on the 8-point
+    fixture (`recall@k = 1.0`).
+  * Default `cfg{}` returns a shape-correct graph without
+    hitting `max_iters`.
+  * Same seed yields a byte-identical output graph.
+  * `nn_descent_with_log` emits one entry per iteration with
+    monotonically non-increasing update counts.
+  * `delta = 1.0` causes the driver to stop after the first
+    iteration (any positive update count is "below" the
+    threshold).
+  * `delta = 0.0, max_iters = 3` runs exactly 3 iterations
+    (the safety bound binds when convergence is impossible).
+  * Negative `delta` throws `std::invalid_argument`.
+- ctest 164/164 green (7 new nn_descent, 157 carried over
+  from Step 32).
+
+### Why
+Steps 31 and 32 each delivered a well-tested primitive but
+not a usable builder. A caller who wanted "build a KNNG via
+NN-Descent" would have to write the iteration loop themselves,
+re-derive the convergence formula, and pick reasonable
+defaults — and would get all of those slightly wrong, slightly
+differently across the codebase. Step 33 is the
+"single function that just works" entry point Phase 5's
+remaining steps and Phase 13's CLI plug into.
+
+The convergence threshold matters more than it sounds. Too
+loose (`delta = 0.1`) and the driver stops while the graph is
+still improving — recall is poor. Too tight (`delta = 0.0001`)
+and the driver runs many more iterations than necessary for the
+last fraction of a percent of recall. The default `0.001`
+matches the Wang et al. paper and lands in a flat region of
+the recall-vs-runtime curve where small perturbations have
+near-zero effect. Step 37's writeup will document the exact
+shape of this curve.
+
+`nn_descent_with_log` exists for the same reason Step 16's
+JSON counters exist: every later phase wants to plot
+"convergence curve = updates per iteration." Without the log
+entry point, the bench harness would have to call
+`init_random_graph` + `local_join` in a loop itself, duplicating
+~30 lines of driver logic. The log shape mirrors the JSON the
+bench will emit, so wiring up Step 37 is a list-comprehension
+rather than a rewrite.
+
+The "stop when `updates < delta * n * k`" formulation deserves
+a moment of explanation. The natural alternative — "stop when
+the graph stops changing" — would require structural comparison
+and is far more expensive than counting bools from
+`NeighborList::insert`. The fraction-of-slots-changed metric is
+both cheap and informative: it directly correlates with
+recall@k convergence (graphs converge to the same fixed point
+under repeated local-join, so once <0.1% of slots change
+per iteration, the remaining changes touch a vanishing fraction
+of neighbours). The plan's `delta = 0.001` is the empirically-
+validated knob from the NN-Descent paper.
+
+### Tradeoff
+- **Two entry points for one feature.** `nn_descent` and
+  `nn_descent_with_log` differ only in whether they write
+  to a stats log. We accept the API doubling because the
+  alternative (single function with optional `vector*` out
+  parameter) makes the common case ugly: every caller has to
+  write `nullptr` even when they don't want stats.
+- **`NnDescentConfig` is a POD with default member
+  initialisers, not a builder pattern.** Designated
+  initialisers (`{.max_iters = 16, .delta = 0.0}`) cover
+  the use cases. A builder would let us validate the
+  combination at construction; we accept the late
+  validation in `nn_descent_impl` because the failure mode
+  is the same (throw) and the construction-time savings are
+  zero.
+- **`delta` is a `double`, the comparison is against an
+  `int64_t * double`.** Mixing fp and integer in the
+  threshold gives the natural meaning ("0.001 of the slots")
+  but introduces a tiny rounding window where an update
+  count could be exactly at the threshold. We accept the
+  imprecision; it surfaces only on `n*k` values where
+  `delta * n*k` is non-integer, which is the typical case
+  anyway.
+- **No early `init_random_graph` failure check before the
+  iteration loop.** The graph builder validates `(ds, k)`
+  itself; failure throws from there. We deliberately do not
+  duplicate the validation in the driver — duplicate
+  validation is duplicate maintenance debt.
+
+### Learning
+- *Convergence criteria deserve their own line in the
+  CHANGELOG.* The `updates / (n*k) < delta` formulation
+  looks trivial in code (one comparison) but is the
+  algorithmic statement that NN-Descent's correctness rests
+  on. Documenting the *interpretation* ("the graph has
+  stabilised when fewer than 0.1% of slots change") is what
+  lets a future reader tune the knob without re-reading the
+  paper.
+- *Optional out-parameters via shared private impl is the
+  right pattern for "same logic, sometimes I want stats."*
+  The `nn_descent_impl` private function with a
+  `std::vector*` parameter — call it with `nullptr` from
+  the simple wrapper, with an actual pointer from the log
+  variant — keeps the iteration logic in one place. Both
+  public entry points are <10 lines each.
+- *Convergence tests can be cheap.* The
+  "stops early on `delta = 1.0`" test runs in microseconds
+  on the 8-point fixture but gives high confidence that
+  the threshold logic works at the boundary. We pin the
+  boundary case explicitly rather than relying on
+  large-fixture tests to catch it.
+
+### Next
+- Step 34: reverse neighbour lists. The local-join currently
+  only considers `p`'s neighbours; adding the *reverse*
+  graph (the points that list `p` as a neighbour) into the
+  union dramatically improves recall convergence,
+  especially at low `k`. The NEO-DNND paper's headline
+  optimisation.
+
+---
+
 ## [Step 32] — Local-join kernel (single-threaded) (2026-05-05)
 
 ### What

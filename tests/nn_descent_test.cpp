@@ -351,4 +351,113 @@ TEST(LocalJoin, GraphSizeMismatchThrows)
         std::invalid_argument);
 }
 
+// --- nn_descent driver -----------------------------------------------
+
+TEST(NnDescent, ConvergesToBruteForceOnEightPointFixture)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+
+    knng::cpu::NnDescentConfig cfg{
+        .max_iters = 16, .delta = 0.0, .seed = 42};
+    const auto g = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg, knng::L2Squared{});
+
+    EXPECT_DOUBLE_EQ(knng::bench::recall_at_k(g, truth), 1.0);
+}
+
+TEST(NnDescent, DefaultConfigConvergesAndStops)
+{
+    // Default config: max_iters=50, delta=0.001, seed=42.
+    // The 8-point fixture converges in <5 iterations so the cap
+    // is far from binding. Just check the function returns a
+    // shape-correct graph.
+    const auto ds = two_clusters_eight_points();
+    const auto g = knng::cpu::nn_descent(
+        ds, std::size_t{3}, /*cfg=*/{}, knng::L2Squared{});
+    EXPECT_EQ(g.n, ds.n);
+    EXPECT_EQ(g.k, std::size_t{3});
+}
+
+TEST(NnDescent, SameSeedYieldsByteIdenticalGraph)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg{};  // default seed
+    const auto a = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg, knng::L2Squared{});
+    const auto b = knng::cpu::nn_descent(
+        ds, std::size_t{3}, cfg, knng::L2Squared{});
+    EXPECT_EQ(a.neighbors, b.neighbors);
+    EXPECT_EQ(a.distances, b.distances);
+}
+
+TEST(NnDescentWithLog, EmitsOnePerIterationDecreasingFraction)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg{
+        .max_iters = 10, .delta = 0.0, .seed = 42};
+    std::vector<knng::cpu::NnDescentIterationLog> log;
+    const auto g = knng::cpu::nn_descent_with_log(
+        ds, std::size_t{3}, cfg, log, knng::L2Squared{});
+
+    EXPECT_EQ(g.n, ds.n);
+    EXPECT_GE(log.size(), std::size_t{1});
+    EXPECT_LE(log.size(), cfg.max_iters);
+    // 1-based iteration counter.
+    for (std::size_t i = 0; i < log.size(); ++i) {
+        EXPECT_EQ(log[i].iteration, i + 1);
+        EXPECT_GE(log[i].update_fraction, 0.0);
+    }
+    // Update fractions are monotonically non-increasing.
+    for (std::size_t i = 1; i < log.size(); ++i) {
+        EXPECT_LE(log[i].updates, log[i - 1].updates)
+            << "iteration " << log[i].iteration
+            << " did more work than iteration "
+            << log[i - 1].iteration;
+    }
+}
+
+TEST(NnDescentWithLog, StopsEarlyWhenDeltaIsLoose)
+{
+    const auto ds = two_clusters_eight_points();
+    // delta = 1.0 — any positive update fraction is "above"
+    // the threshold check (`updates < cfg.delta * n*k`); the
+    // first iteration's update count *is* less than 1.0 *
+    // n*k, so the loop should break immediately after the
+    // first iteration.
+    knng::cpu::NnDescentConfig cfg{
+        .max_iters = 50, .delta = 1.0, .seed = 42};
+    std::vector<knng::cpu::NnDescentIterationLog> log;
+    (void)knng::cpu::nn_descent_with_log(
+        ds, std::size_t{3}, cfg, log, knng::L2Squared{});
+    EXPECT_EQ(log.size(), std::size_t{1});
+}
+
+TEST(NnDescentWithLog, RespectsMaxItersWithDeltaZero)
+{
+    // delta = 0.0 — the threshold is impossible to undershoot
+    // (every iteration runs at least one update on a non-trivial
+    // input until the graph is exactly converged). Cap at 3
+    // iterations to verify the safety bound.
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg{
+        .max_iters = 3, .delta = 0.0, .seed = 42};
+    std::vector<knng::cpu::NnDescentIterationLog> log;
+    (void)knng::cpu::nn_descent_with_log(
+        ds, std::size_t{3}, cfg, log, knng::L2Squared{});
+    EXPECT_LE(log.size(), cfg.max_iters);
+}
+
+TEST(NnDescent, NegativeDeltaThrowsInvalidArgument)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentConfig cfg{};
+    cfg.delta = -0.1;
+    EXPECT_THROW(
+        { (void)knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
 } // namespace

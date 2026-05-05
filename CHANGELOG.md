@@ -12,6 +12,160 @@ independent of the code diff.
 
 ---
 
+## [Step 32] — Local-join kernel (single-threaded) (2026-05-05)
+
+### What
+- Added `knng::cpu::local_join<D>(const Dataset&, NnDescentGraph&,
+  D)` — the algorithmic core of NN-Descent. One iteration runs in
+  two phases:
+  * **Snapshot.** Walk every point. For each, partition its
+    current list into `new[p] = {id : entry.is_new}` and
+    `old[p] = {id : !entry.is_new}`. Then call
+    `mark_all_old()` so the *next* iteration sees only entries
+    that get newly inserted *during* this one. The snapshots
+    are vectors on the call frame; the algorithm operates from
+    them after this point, never re-reading the lists' flags.
+  * **Local-join.** For each point `p`, compute and insert
+    every `(u, v)` pair where:
+      * `u` and `v` are both in `new[p]` and `u < v` (the
+        `<` avoids visiting the same pair twice within `p`'s
+        neighbourhood);
+      * `u ∈ new[p]` and `v ∈ old[p]` (no duplication concern
+        because the two sets are disjoint).
+    Old × old pairs are deliberately omitted — that is the
+    optimisation Step 30's `is_new` flag exists to enable.
+- Inserts during the local-join are flagged `is_new = true` so
+  they propagate to the next iteration's snapshot. The function
+  returns the total `NeighborList::insert` calls that *changed*
+  a list; Step 33's driver compares this to `delta * n * k` to
+  decide convergence.
+- Explicit instantiations for `L2Squared` and
+  `NegativeInnerProduct` mirroring `init_random_graph`.
+- Five new `test_nn_descent` cases pinning the contract:
+  * First iteration on a random graph produces a non-zero
+    update count and preserves the per-row shape (`size == k`,
+    sorted ascending, no self-matches).
+  * After one iteration, both `is_new = true` and
+    `is_new = false` entries coexist (snapshot plus
+    fresh-insert combination).
+  * Iterating to convergence on the 8-point fixture matches
+    brute-force ground truth exactly (`recall@k = 1.0`).
+  * Per-iteration update counts are monotonically non-
+    increasing (the algorithmic claim — convergence comes
+    from work shrinking).
+  * Graph-size mismatch with the dataset throws
+    `std::invalid_argument`.
+- Wired `knng::bench` into the `test_nn_descent` link line so
+  the recall-against-brute-force assertion can use Step 15's
+  `recall_at_k`.
+- ctest 157/157 green (5 new local-join, 152 carried over from
+  Step 31).
+
+### Why
+The local-join is *the* defining innovation of NN-Descent. The
+high-level intuition: "the neighbour of my neighbour is likely
+my neighbour." If `p` has neighbours `u` and `v`, then `u` and
+`v` are by transitivity likely to be each other's neighbours
+too — so the algorithm proactively computes `d(u, v)` and offers
+the result to both lists, even though `u` and `v` were never
+directly compared. Iterating this exchange across every
+point's neighbourhood propagates information through the graph
+much faster than brute-force's "compare every pair against
+every pair" `O(n²)` scan.
+
+The asymptotic win is dramatic: brute-force is `O(n²)` per
+build (`n * (n - 1)` distance computations); the local-join is
+`O(n * k²)` per *iteration* (every point contributes `O(k²)`
+pairs from its neighbourhood). For `n = 1M, k = 20, iterations
+= 10`, this is 4 billion distance ops vs 1 trillion — a 250×
+asymptotic improvement before any constant-factor optimisation.
+
+The two-phase snapshot is what makes the algorithm
+parallelisable in Step 36. By freezing every point's `new[p]`
+and `old[p]` upfront (and flipping the in-list flags atomically
+per-point in phase 1), phase 2's local-join body only mutates
+*other* points' lists, never reads from a list it is currently
+modifying. The single-threaded version doesn't strictly need
+the two-phase split — sequential mutation would be order-
+dependent but correct — but pinning the snapshot shape now
+means Step 36 is a translation, not a redesign.
+
+The `u < v` filter inside `new × new` is the second-cheapest
+optimisation in the file (after `is_new`). Without it, every
+pair gets visited twice within `p`'s neighbourhood (once as
+`(u, v)` and once as `(v, u)`); both visits compute the same
+`d(u, v)` and offer it to the same two lists. The filter halves
+the work on `new × new` pairs; the `new × old` loop has no
+analogous duplication because the two sets are disjoint.
+
+The convergence-counter return value is the contract that lets
+Step 33 stop the loop without poking inside the data structure.
+Step 30's `NeighborList::insert` already returns `bool` for the
+"did this change anything?" question; `local_join` simply
+sums those bools. The aggregate is the natural input to the
+`updates / (n * k) < delta` convergence check.
+
+### Tradeoff
+- **`std::vector<std::vector<index_t>>` snapshots cost
+  `O(n * k)` allocations per iteration.** A pre-allocated
+  flat `(n * 2 * k)` buffer with offsets would amortise to
+  zero allocations, but at the cost of ~30 lines of fiddly
+  index math. We keep the simpler shape; profiling at
+  SIFT1M-scale will tell us when it matters.
+- **The `u == v` defensive checks inside the inner loops
+  cannot fire** (snapshots contain distinct ids by
+  construction). They are kept as belt-and-braces in case a
+  future bug leaks duplicates into a list; the branch is
+  predictable and adds <1% to the inner loop.
+- **No early exit on `worst_dist`.** The `NeighborList`
+  exposes the worst-distance accessor for exactly this
+  shape ("if the candidate distance is already worse than
+  the worst slot, skip insertion"), but the local-join always
+  pays the `O(d)` distance computation before checking. We
+  accept the cost: the algorithmic shape is what
+  `recall@k = 1.0` rests on, and the early exit would
+  introduce subtle ordering effects that complicate the test
+  fixtures. A future "fast-path local-join" can revisit.
+- **The function template instantiates the body twice.**
+  Each metric (`L2Squared`, `NegativeInnerProduct`) gets its
+  own copy of the local-join. We accept the binary size
+  growth — the alternative (runtime-dispatched metric)
+  would put a virtual call in the hottest inner loop.
+
+### Learning
+- *NN-Descent's correctness emerges from iteration, not from
+  any single pass being correct.* The first iteration's
+  output is *not* a high-recall graph — it is just better
+  than random. Each subsequent iteration further reduces
+  the per-point neighbour distances. Pinning the
+  "monotonic update count" test
+  (`u2 ≤ u1`) is the lightweight way to assert this without
+  measuring recall directly.
+- *The `u < v` filter is the kind of optimisation that
+  costs zero lines of explanation but doubles throughput.*
+  In a research codebase the temptation is to write the
+  loop as `for u in nv: for v in nv: if u < v: ...`; the
+  arithmetic-friendly form `for i in [0, k): for j in (i, k):`
+  is functionally identical but reads as the algorithm's
+  intent ("each pair, once").
+- *The acid test for any iterative refinement is:
+  "does it converge to the brute-force answer?"* The
+  `IteratingToConvergenceMatchesBruteForceRecall` test is
+  the single piece of evidence that the local-join is
+  algorithmically correct — every other property
+  (shape, `is_new` accounting, monotone updates) could pass
+  on a buggy implementation that converges to *some*
+  answer, just not the right one.
+
+### Next
+- Step 33: the convergence-driven driver. Iterate
+  `local_join` until `n_updates / (n * k) < delta` or the
+  iteration cap is hit. Consumes the convergence-counter
+  return value this step ships and produces the public
+  `nn_descent` builder.
+
+---
+
 ## [Step 31] — Random graph initialisation (`init_random_graph`) (2026-05-05)
 
 ### What

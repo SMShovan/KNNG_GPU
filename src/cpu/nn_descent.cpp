@@ -130,4 +130,98 @@ template NnDescentGraph init_random_graph<L2Squared>(
 template NnDescentGraph init_random_graph<NegativeInnerProduct>(
     const Dataset&, std::size_t, std::uint64_t, NegativeInnerProduct);
 
+template <Distance D>
+std::size_t local_join(const Dataset& ds,
+                        NnDescentGraph& graph,
+                        D distance)
+{
+    const std::size_t n = ds.n;
+    if (graph.n() != n) {
+        throw std::invalid_argument(
+            "knng::cpu::local_join: graph.n != ds.n");
+    }
+    assert(ds.is_contiguous());
+
+    // Phase 1: snapshot per-point new / old id sets, then flip
+    // every entry to is_new=false. The snapshots live in vectors
+    // on the call frame; we accept the `O(n * k)` allocation
+    // because it avoids the alternative (mutating during the
+    // local-join, which is order-dependent and harder to
+    // parallelise).
+    std::vector<std::vector<index_t>> new_ids(n);
+    std::vector<std::vector<index_t>> old_ids(n);
+    for (std::size_t p = 0; p < n; ++p) {
+        const auto view = graph.at(p).view();
+        new_ids[p].reserve(view.size());
+        old_ids[p].reserve(view.size());
+        for (const Neighbor& nb : view) {
+            if (nb.is_new) {
+                new_ids[p].push_back(nb.id);
+            } else {
+                old_ids[p].push_back(nb.id);
+            }
+        }
+        graph.at(p).mark_all_old();
+    }
+
+    // Phase 2: local-join. For each point p, enumerate the
+    // new × new and new × old pairs in p's neighbourhood and
+    // offer the `d(u, v)` distance to both endpoints' lists.
+    std::size_t updates = 0;
+    for (std::size_t p = 0; p < n; ++p) {
+        const auto& nv = new_ids[p];
+        const auto& ov = old_ids[p];
+
+        // new × new — only u < v to avoid double-visiting a
+        // pair within p's neighbourhood.
+        for (std::size_t i = 0; i + 1 < nv.size(); ++i) {
+            const index_t u = nv[i];
+            const auto    a = ds.row(u);
+            for (std::size_t j = i + 1; j < nv.size(); ++j) {
+                const index_t v = nv[j];
+                if (u == v) {
+                    continue;  // defensive; the snapshot is
+                               // distinct so this cannot fire,
+                               // but it lets the assertion
+                               // simplify.
+                }
+                const float d = distance(a, ds.row(v));
+                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+        }
+
+        // new × old. The two sets are disjoint by construction
+        // (an entry is either is_new or not), so we visit every
+        // (u, v) pair exactly once with no duplication concern.
+        for (const index_t u : nv) {
+            const auto a = ds.row(u);
+            for (const index_t v : ov) {
+                if (u == v) {
+                    continue;
+                }
+                const float d = distance(a, ds.row(v));
+                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                    ++updates;
+                }
+            }
+        }
+    }
+
+    return updates;
+}
+
+template std::size_t local_join<L2Squared>(
+    const Dataset&, NnDescentGraph&, L2Squared);
+
+template std::size_t local_join<NegativeInnerProduct>(
+    const Dataset&, NnDescentGraph&, NegativeInnerProduct);
+
 } // namespace knng::cpu

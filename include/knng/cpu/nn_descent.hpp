@@ -122,4 +122,56 @@ template <Distance D>
     std::uint64_t seed,
     D distance = D{});
 
+/// One iteration of NN-Descent's local-join kernel.
+///
+/// The algorithmic core of the entire builder. For each point `p`,
+/// every pair `(u, v)` of `p`'s neighbours where at least one is
+/// flagged `is_new = true` becomes a candidate distance computation;
+/// the result is offered to both `u`'s and `v`'s lists. The `is_new`
+/// flag (set up by Step 30 and seeded `true` by Step 31's random
+/// initialiser) is what prunes the work — old × old pairs were
+/// considered in a previous iteration and re-comparing them adds
+/// no information.
+///
+/// Iteration shape (Wang et al. 2012 §4.1):
+///
+///   1. **Snapshot.** Walk every point. For each, partition its
+///      current list into `new[p] = {id : entry.is_new}` and
+///      `old[p] = {id : !entry.is_new}`. Then call
+///      `mark_all_old()` so the *next* iteration sees only the
+///      entries that get newly inserted *during* this one.
+///   2. **Local-join.** For each point `p`, compute and insert
+///      every `(u, v)` where:
+///        * `u` and `v` are both in `new[p]` and `u < v` (the
+///          `<` avoids visiting the same pair twice within `p`);
+///        * `u ∈ new[p]` and `v ∈ old[p]` (no duplication concern
+///          because the two sets are disjoint).
+///      Old × old is *deliberately omitted* — that is the
+///      optimisation Step 30's `is_new` flag exists to enable.
+///
+/// Inserts during phase 2 are flagged `is_new = true` so they are
+/// picked up by the next iteration's snapshot.
+///
+/// Convergence-counting hook: returns the total number of
+/// `NeighborList::insert` calls that *changed* a list (the bool
+/// from Step 30). Step 33's driver compares the returned count to
+/// `delta * n * k`; below the threshold means the graph has
+/// stabilised.
+///
+/// Single-threaded by design; Step 36 will introduce the
+/// OpenMP-parallel variant with per-point locks. Even single-
+/// threaded the kernel is `O(n * k²)` per iteration vs
+/// brute-force's `O(n²)`, so for `k ≪ n` the asymptotic win is
+/// substantial.
+///
+/// @param ds Reference dataset. Must satisfy `ds.is_contiguous()`.
+/// @param graph In/out graph; rows are mutated in place.
+/// @param distance Distance functor satisfying `knng::Distance`.
+/// @return Number of inserts that changed a row this iteration.
+///         Step 33 uses this to decide convergence.
+template <Distance D>
+[[nodiscard]] std::size_t local_join(const Dataset& ds,
+                                     NnDescentGraph& graph,
+                                     D distance = D{});
+
 } // namespace knng::cpu

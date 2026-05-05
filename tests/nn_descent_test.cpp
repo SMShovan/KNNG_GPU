@@ -11,10 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include "knng/bench/recall.hpp"
 #include "knng/core/dataset.hpp"
 #include "knng/core/distance.hpp"
 #include "knng/core/graph.hpp"
 #include "knng/core/types.hpp"
+#include "knng/cpu/brute_force.hpp"
 #include "knng/cpu/nn_descent.hpp"
 
 namespace {
@@ -234,6 +236,118 @@ TEST(InitRandomGraph, EmptyDatasetThrowsInvalidArgument)
         { (void)knng::cpu::init_random_graph(
             ds, std::size_t{1}, std::uint64_t{1},
             knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
+// --- local_join ------------------------------------------------------
+
+TEST(LocalJoin, FirstIterationProducesUpdatesAndPreservesShape)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    const std::size_t updates = knng::cpu::local_join(
+        ds, g, knng::L2Squared{});
+
+    // The first local-join on a random graph must do *some* work.
+    EXPECT_GT(updates, std::size_t{0});
+
+    // Shape preserved: each row still holds exactly k entries
+    // and they remain sorted ascending by distance.
+    for (std::size_t p = 0; p < g.n(); ++p) {
+        EXPECT_EQ(g.at(p).size(), std::size_t{3});
+        const auto v = g.at(p).view();
+        for (std::size_t j = 1; j < v.size(); ++j) {
+            EXPECT_LE(v[j - 1].dist, v[j].dist)
+                << "row " << p << " column " << j;
+        }
+        // Self-match never appears.
+        for (const auto& nb : v) {
+            EXPECT_NE(static_cast<std::size_t>(nb.id), p);
+        }
+    }
+}
+
+TEST(LocalJoin, AfterFirstIterationOriginalEntriesAreOldFreshOnesNew)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    // Before local_join: every entry is is_new=true.
+    for (std::size_t p = 0; p < g.n(); ++p) {
+        for (const auto& nb : g.at(p).view()) {
+            EXPECT_TRUE(nb.is_new);
+        }
+    }
+    (void)knng::cpu::local_join(ds, g, knng::L2Squared{});
+    // After: surviving original entries are is_new=false; freshly-
+    // inserted ones are is_new=true. We can't predict which is
+    // which on a non-trivial fixture, but at least one freshly-
+    // inserted entry should be is_new=true (because the graph
+    // converged toward truth — see the recall test below).
+    bool any_new   = false;
+    bool any_old   = false;
+    for (std::size_t p = 0; p < g.n(); ++p) {
+        for (const auto& nb : g.at(p).view()) {
+            if (nb.is_new) any_new = true;
+            else           any_old = true;
+        }
+    }
+    EXPECT_TRUE(any_new);
+    EXPECT_TRUE(any_old);
+}
+
+TEST(LocalJoin, IteratingToConvergenceMatchesBruteForceRecall)
+{
+    // The acid test: after enough local-join iterations on a
+    // small fixture the NN-Descent graph should reach the
+    // brute-force ground truth (recall@k = 1.0).
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    for (int iter = 0; iter < 16; ++iter) {
+        const std::size_t updates = knng::cpu::local_join(
+            ds, g, knng::L2Squared{});
+        if (updates == 0) {
+            break;
+        }
+    }
+
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+    const double recall =
+        knng::bench::recall_at_k(g.to_knng(), truth);
+    EXPECT_DOUBLE_EQ(recall, 1.0);
+}
+
+TEST(LocalJoin, SecondIterationDoesAtMostAsMuchWork)
+{
+    const auto ds = two_clusters_eight_points();
+    auto g = knng::cpu::init_random_graph(
+        ds, std::size_t{4}, std::uint64_t{777}, knng::L2Squared{});
+
+    const std::size_t u1 = knng::cpu::local_join(
+        ds, g, knng::L2Squared{});
+    const std::size_t u2 = knng::cpu::local_join(
+        ds, g, knng::L2Squared{});
+
+    // The graph monotonically converges; the second iteration
+    // cannot increase the per-iteration update count above the
+    // first. (Strict-less is more typical but not guaranteed; the
+    // bound is the algorithmic claim.)
+    EXPECT_LE(u2, u1);
+}
+
+TEST(LocalJoin, GraphSizeMismatchThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentGraph wrong(ds.n + 1, 3);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join(
+            ds, wrong, knng::L2Squared{}); },
         std::invalid_argument);
 }
 

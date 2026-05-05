@@ -228,6 +228,7 @@ gtest_discover_tests(test_neighbor_list
 add_executable(test_nn_descent nn_descent_test.cpp)
 target_link_libraries(test_nn_descent
     PRIVATE
+        knng::bench
         knng::cpu
         GTest::gtest_main
 )

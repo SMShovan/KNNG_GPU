@@ -80,7 +80,12 @@ void BM_NnDescent_Synthetic(benchmark::State& state)
 
     knng::cpu::NnDescentConfig cfg{};
     cfg.max_iters    = 32;
-    cfg.delta        = 0.001;
+    // delta = 0 forces full convergence so recall is the
+    // algorithm's *fixed-point* quality, not "wherever the
+    // 0.001 threshold happened to land." The bench harness
+    // is the right place to use the strict convergence; a
+    // production caller would use the default 0.001.
+    cfg.delta        = 0.0;
     cfg.seed         = seed;
     cfg.use_reverse  = use_r != 0;
     cfg.rho          = rho;

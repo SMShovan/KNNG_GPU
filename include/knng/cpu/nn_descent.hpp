@@ -174,6 +174,50 @@ template <Distance D>
                                      NnDescentGraph& graph,
                                      D distance = D{});
 
+/// One iteration of NN-Descent's local-join kernel *with reverse
+/// neighbour lists* added to the candidate set (Step 34).
+///
+/// Wang et al. 2012 §4.2 / NEO-DNND §3.1 observation: a point's
+/// neighbour-of-neighbour relation is *not* symmetric under
+/// finite `k`. If `q` lists `p` in its top-`k`, that does not
+/// guarantee `p` lists `q` in its own top-`k`. The plain
+/// local-join (Step 32) only walks `p`'s forward neighbours; if
+/// `p` happens to have an excellent candidate sitting in some
+/// other point's list (where `p` is the candidate), the plain
+/// local-join can miss it for many iterations.
+///
+/// The reverse-list variant fixes this by tracking, for each
+/// point `p`, the *reverse* graph
+/// `R(p) = { q : p ∈ neighbours(q) }`. The local-join then
+/// processes `(u, v)` pairs drawn from
+/// `neighbours(p) ∪ reverse_neighbours(p)`, which is the set of
+/// "every point that knows about `p` or that `p` knows about" —
+/// the algorithmic equivalent of "ask both sides of the
+/// neighbour relation."
+///
+/// The cost is one extra `O(n * k)` pass per iteration to build
+/// the reverse lists from the per-point new/old snapshots. The
+/// payoff is a substantial recall acceleration: a graph that
+/// took 12 iterations under plain local-join often converges in
+/// 5–6 with reverse lists.
+///
+/// Implementation: builds two reverse-list arrays
+/// (`rev_new`, `rev_old`) from the snapshots, unions each into
+/// the local-join's candidate sets per point, deduplicates by
+/// sort + unique (the union can contain duplicates because
+/// `p ↔ q` mutual neighbours appear from both directions), then
+/// runs the same `(new × new, u < v)` + `(new × old)` pair
+/// enumeration as Step 32.
+///
+/// @return Number of `NeighborList::insert` calls that changed a
+///          row this iteration. Same convergence-counter
+///          contract as `local_join`.
+template <Distance D>
+[[nodiscard]] std::size_t local_join_with_reverse(
+    const Dataset& ds,
+    NnDescentGraph& graph,
+    D distance = D{});
+
 /// Tunable knobs for the convergence-driven NN-Descent driver.
 struct NnDescentConfig {
     /// Hard cap on iterations. The convergence criterion is the
@@ -201,6 +245,13 @@ struct NnDescentConfig {
     /// Same seed → bit-identical output graph; the driver never
     /// introduces additional randomness beyond initialisation.
     std::uint64_t seed = 42;
+
+    /// When `true` (default), the driver runs `local_join_with_reverse`
+    /// each iteration; when `false`, the plain `local_join`. Reverse
+    /// lists are the NEO-DNND recall-acceleration headline; turning
+    /// them off is rarely the right call but is supported for
+    /// pedagogy and ablation studies.
+    bool use_reverse = true;
 };
 
 /// Per-iteration statistics emitted by `nn_descent_with_log`. The

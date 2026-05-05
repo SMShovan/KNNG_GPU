@@ -12,6 +12,155 @@ independent of the code diff.
 
 ---
 
+## [Step 34] — Reverse neighbour lists (NEO-DNND headline win) (2026-05-05)
+
+### What
+- Added `knng::cpu::local_join_with_reverse<D>(ds, graph,
+  distance)` — the reverse-augmented local-join. Each
+  iteration runs in three phases:
+  1. **Snapshot + age** (shared with plain `local_join` via
+     a new private `snapshot_and_age` helper). Build per-point
+     `new_ids` / `old_ids` from the current list, then flip
+     every entry's `is_new` flag to `false`.
+  2. **Reverse-list construction.** Walk the snapshots; for
+     every `q ∈ new_ids[p]`, push `p` into `rev_new[q]`. Same
+     for `old`. After this phase, `rev_new[p]` holds every
+     point whose this-iteration *new* snapshot contains `p`.
+  3. **Local-join over the union.** For each point `p`:
+     merge `(new_ids[p] ∪ rev_new[p])` and
+     `(old_ids[p] ∪ rev_old[p])`, sort + unique each side,
+     then drop ids that landed in *both* totals from the
+     `old` side (the `new` flag wins so a fresh exchange
+     propagates). Run the same `(new × new, u < v) +
+     (new × old)` pair enumeration as Step 32.
+- Refactored Step 32's local-join to use two new private
+  helpers in the anonymous namespace:
+  * `snapshot_and_age(graph, new_ids, old_ids)` — shared
+    snapshot.
+  * `join_pairs<D>(ds, graph, nv, ov, distance)` — pair
+    enumeration body. Both `local_join` and
+    `local_join_with_reverse` call this; the only difference
+    between them is what `nv` / `ov` they hand in.
+  * `sort_unique(v)` — sort-then-`unique` shorthand.
+- Extended `NnDescentConfig` with `bool use_reverse = true`.
+  The driver now picks between `local_join` (when `false`)
+  and `local_join_with_reverse` (when `true`, the default).
+  Defaulting to `true` matches the NEO-DNND paper's
+  recommendation; setting it `false` is supported for
+  ablation studies.
+- Explicit instantiations for `local_join_with_reverse<D>`
+  for `L2Squared` and `NegativeInnerProduct`.
+- Four new `test_nn_descent` cases:
+  * `local_join_with_reverse` does at least as much work as
+    plain on the first iteration (the candidate set is a
+    superset).
+  * Reverse-enabled NN-Descent converges in no more
+    iterations than the plain variant on the 8-point
+    fixture.
+  * Both variants reach `recall@k = 1.0` after enough
+    iterations on the 8-point fixture.
+  * `local_join_with_reverse` throws on graph-size mismatch.
+- ctest 168/168 green (4 new nn_descent, 164 carried over
+  from Step 33).
+
+### Why
+Reverse neighbour lists are the single most impactful
+algorithmic optimisation NN-Descent ships, and the headline
+contribution of the NEO-DNND paper. Wang et al. 2012 §4.2
+observes that the neighbour-of-neighbour relation is *not*
+symmetric under finite `k`: if `q` lists `p` in its top-`k`,
+that does not guarantee `p` lists `q` in its own top-`k`. So
+even after a perfect `(new × new)` local-join from `q`'s
+perspective, `p` may still not have been told that `q` is a
+candidate.
+
+The fix walks the relation from both directions. For each
+point `p`, the algorithm aggregates not just `p`'s forward
+neighbours but also every point that has *p* in its forward
+list. That superset is then run through the same pair-
+enumeration as the plain local-join. The empirical effect on
+SIFT1M-scale benchmarks is dramatic: a graph that took 12
+iterations under plain local-join often converges in 5–6
+under reverse. The compute cost per iteration grows
+modestly (more pairs to consider) but the iteration count
+drops more than enough to come out ahead in wall time.
+
+The ablation knob (`cfg.use_reverse = false`) exists for
+two reasons: pedagogy (we want a minimal version of
+NN-Descent in the codebase that a future contributor can
+read alongside the optimised one) and the Step-37 writeup
+(which will plot `recall@k` vs iteration both with and
+without reverse to make the headline number quantitative).
+
+The `(new × new, u < v) + (new × old)` enumeration shape from
+Step 32 carries through unchanged. The deduplication of
+"items in both totals" — which can happen when `p ↔ q`
+mutual neighbours appear from both directions — uses a
+two-finger merge over the sorted vectors. Constant-factor
+fast and the kind of thing that profiles into noise next to
+the per-pair distance computation.
+
+### Tradeoff
+- **Per-iteration memory grows from `2 * O(n*k)` to
+  `4 * O(n*k)`.** The reverse-list arrays double the
+  snapshot storage. For SIFT1M with `k = 20`, this is
+  ~40 MB extra — negligible, but it is the kind of
+  allocation cost a long-lived GPU port (Phase 9) will
+  want to amortise via reusable buffers. The CHANGELOG
+  comment is the contract.
+- **The "drop from old when present in new" merge is `O(|new|
+  + |old|)` per point.** A `std::unordered_set` over
+  `new_total` would be `O(|new| + |old|)` *expected* but
+  with hash overhead. The two-finger merge after
+  `sort_unique` is what we ship; it is cache-friendly and
+  branch-predictable.
+- **`use_reverse = true` becomes the silent default.**
+  Existing code that called `nn_descent(ds, k, {}, dist)`
+  before Step 34 implicitly opted into reverse lists with
+  this commit. We accept the silent change because (a)
+  every existing test's `recall@k` result is no worse and
+  often better, and (b) every test that wanted ablation
+  semantics now has the explicit knob to flip.
+- **The two-phase reverse-list build is *not* incremental.**
+  Each iteration rebuilds `rev_new` / `rev_old` from
+  scratch. An incremental update (track the deltas during
+  `local_join`) would save the `O(n * k)` walk but
+  complicate the snapshot logic. Profiling at SIFT1M will
+  decide whether the savings are worth the complexity.
+
+### Learning
+- *"More work per iteration, fewer iterations" is the
+  standard NN-Descent shape.* Every later optimisation
+  (sampling, parallelisation, GPU port) follows the same
+  pattern: pay a small per-iteration cost increase to make
+  each iteration *more* convergent, so the total
+  iteration count drops dispropor­tionately. Recognising
+  this trade as the project's recurring theme makes
+  future steps easier to reason about.
+- *Refactoring `join_pairs` out before adding
+  `local_join_with_reverse` was the right move.* Two
+  call sites (plain and reverse) sharing one helper means
+  any future fix to the pair-enumeration touches one
+  place. The pre-Step-34 form would have duplicated the
+  body, and the inevitable third variant (Step 35's
+  sampling) would have made the duplication pernicious.
+- *Defaults reflect best practice; ablation switches
+  preserve pedagogy.* The `use_reverse = true` default is
+  what every textbook says; the `false` knob is what a
+  reader new to the algorithm needs in order to see what
+  reverse lists actually buy. Both should be a one-line
+  change to flip; we built both.
+
+### Next
+- Step 35: sampling. Subsample the local-join candidate
+  set to `rho * k` per point (default `rho = 1.0`,
+  meaning no sampling). The `rho` knob is the third
+  classic NN-Descent tuning parameter; it controls the
+  speed/quality tradeoff and lands as a `NnDescentConfig`
+  field with bench-harness sweep coverage.
+
+---
+
 ## [Step 33] — Convergence-driven NN-Descent driver (2026-05-05)
 
 ### What

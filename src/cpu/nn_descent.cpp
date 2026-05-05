@@ -16,11 +16,13 @@
 
 #include "knng/cpu/nn_descent.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "knng/random.hpp"
 
@@ -130,26 +132,18 @@ template NnDescentGraph init_random_graph<L2Squared>(
 template NnDescentGraph init_random_graph<NegativeInnerProduct>(
     const Dataset&, std::size_t, std::uint64_t, NegativeInnerProduct);
 
-template <Distance D>
-std::size_t local_join(const Dataset& ds,
-                        NnDescentGraph& graph,
-                        D distance)
-{
-    const std::size_t n = ds.n;
-    if (graph.n() != n) {
-        throw std::invalid_argument(
-            "knng::cpu::local_join: graph.n != ds.n");
-    }
-    assert(ds.is_contiguous());
+namespace {
 
-    // Phase 1: snapshot per-point new / old id sets, then flip
-    // every entry to is_new=false. The snapshots live in vectors
-    // on the call frame; we accept the `O(n * k)` allocation
-    // because it avoids the alternative (mutating during the
-    // local-join, which is order-dependent and harder to
-    // parallelise).
-    std::vector<std::vector<index_t>> new_ids(n);
-    std::vector<std::vector<index_t>> old_ids(n);
+/// Snapshot every point's new / old ids and flip every list
+/// entry to `is_new = false`. Shared by `local_join` and
+/// `local_join_with_reverse`.
+void snapshot_and_age(NnDescentGraph& graph,
+                      std::vector<std::vector<index_t>>& new_ids,
+                      std::vector<std::vector<index_t>>& old_ids)
+{
+    const std::size_t n = graph.n();
+    new_ids.assign(n, {});
+    old_ids.assign(n, {});
     for (std::size_t p = 0; p < n; ++p) {
         const auto view = graph.at(p).view();
         new_ids[p].reserve(view.size());
@@ -163,54 +157,56 @@ std::size_t local_join(const Dataset& ds,
         }
         graph.at(p).mark_all_old();
     }
+}
 
-    // Phase 2: local-join. For each point p, enumerate the
-    // new × new and new × old pairs in p's neighbourhood and
-    // offer the `d(u, v)` distance to both endpoints' lists.
+/// Enumerate `(new × new, u < v)` and `(new × old)` pairs and
+/// offer each distance to both endpoints' lists. Returns the
+/// number of `insert` calls that changed a row. Shared by both
+/// local-join variants — the reverse-list variant just hands a
+/// larger `nv` / `ov` after merging the snapshots.
+template <Distance D>
+std::size_t join_pairs(const Dataset& ds,
+                        NnDescentGraph& graph,
+                        const std::vector<index_t>& nv,
+                        const std::vector<index_t>& ov,
+                        D distance)
+{
     std::size_t updates = 0;
-    for (std::size_t p = 0; p < n; ++p) {
-        const auto& nv = new_ids[p];
-        const auto& ov = old_ids[p];
 
-        // new × new — only u < v to avoid double-visiting a
-        // pair within p's neighbourhood.
-        for (std::size_t i = 0; i + 1 < nv.size(); ++i) {
-            const index_t u = nv[i];
-            const auto    a = ds.row(u);
-            for (std::size_t j = i + 1; j < nv.size(); ++j) {
-                const index_t v = nv[j];
-                if (u == v) {
-                    continue;  // defensive; the snapshot is
-                               // distinct so this cannot fire,
-                               // but it lets the assertion
-                               // simplify.
-                }
-                const float d = distance(a, ds.row(v));
-                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
-                    ++updates;
-                }
-                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
-                    ++updates;
-                }
+    // new × new — only u < v to avoid double-visiting a pair
+    // within this point's candidate set.
+    for (std::size_t i = 0; i + 1 < nv.size(); ++i) {
+        const index_t u = nv[i];
+        const auto    a = ds.row(u);
+        for (std::size_t j = i + 1; j < nv.size(); ++j) {
+            const index_t v = nv[j];
+            if (u == v) {
+                continue;
+            }
+            const float d = distance(a, ds.row(v));
+            if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                ++updates;
+            }
+            if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                ++updates;
             }
         }
+    }
 
-        // new × old. The two sets are disjoint by construction
-        // (an entry is either is_new or not), so we visit every
-        // (u, v) pair exactly once with no duplication concern.
-        for (const index_t u : nv) {
-            const auto a = ds.row(u);
-            for (const index_t v : ov) {
-                if (u == v) {
-                    continue;
-                }
-                const float d = distance(a, ds.row(v));
-                if (graph.at(u).insert(v, d, /*is_new=*/true)) {
-                    ++updates;
-                }
-                if (graph.at(v).insert(u, d, /*is_new=*/true)) {
-                    ++updates;
-                }
+    // new × old — disjoint by definition (an entry is either
+    // is_new or not), so no duplication concern.
+    for (const index_t u : nv) {
+        const auto a = ds.row(u);
+        for (const index_t v : ov) {
+            if (u == v) {
+                continue;
+            }
+            const float d = distance(a, ds.row(v));
+            if (graph.at(u).insert(v, d, /*is_new=*/true)) {
+                ++updates;
+            }
+            if (graph.at(v).insert(u, d, /*is_new=*/true)) {
+                ++updates;
             }
         }
     }
@@ -218,10 +214,139 @@ std::size_t local_join(const Dataset& ds,
     return updates;
 }
 
+/// Sort + `unique` an id vector in place. Used to deduplicate
+/// the merged forward / reverse candidate sets.
+inline void sort_unique(std::vector<index_t>& v)
+{
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+
+} // namespace
+
+template <Distance D>
+std::size_t local_join(const Dataset& ds,
+                        NnDescentGraph& graph,
+                        D distance)
+{
+    const std::size_t n = ds.n;
+    if (graph.n() != n) {
+        throw std::invalid_argument(
+            "knng::cpu::local_join: graph.n != ds.n");
+    }
+    assert(ds.is_contiguous());
+
+    std::vector<std::vector<index_t>> new_ids;
+    std::vector<std::vector<index_t>> old_ids;
+    snapshot_and_age(graph, new_ids, old_ids);
+
+    std::size_t updates = 0;
+    for (std::size_t p = 0; p < n; ++p) {
+        updates += join_pairs(ds, graph, new_ids[p], old_ids[p],
+                              distance);
+    }
+    return updates;
+}
+
+template <Distance D>
+std::size_t local_join_with_reverse(const Dataset& ds,
+                                     NnDescentGraph& graph,
+                                     D distance)
+{
+    const std::size_t n = ds.n;
+    if (graph.n() != n) {
+        throw std::invalid_argument(
+            "knng::cpu::local_join_with_reverse: graph.n != ds.n");
+    }
+    assert(ds.is_contiguous());
+
+    // Phase 1: snapshot + age, identical to plain local-join.
+    std::vector<std::vector<index_t>> new_ids;
+    std::vector<std::vector<index_t>> old_ids;
+    snapshot_and_age(graph, new_ids, old_ids);
+
+    // Phase 2: build per-point reverse-new and reverse-old lists.
+    // For every entry `q ∈ new_ids[p]`, push `p` into
+    // `rev_new[q]`. Same for old. The result: for any `q`,
+    // `rev_new[q]` is the set of points whose *new* neighbour
+    // list (this iteration's snapshot) contains `q`.
+    std::vector<std::vector<index_t>> rev_new(n);
+    std::vector<std::vector<index_t>> rev_old(n);
+    for (std::size_t p = 0; p < n; ++p) {
+        const index_t pi = static_cast<index_t>(p);
+        for (const index_t u : new_ids[p]) {
+            rev_new[u].push_back(pi);
+        }
+        for (const index_t u : old_ids[p]) {
+            rev_old[u].push_back(pi);
+        }
+    }
+
+    // Phase 3: per-point local-join over the unioned candidate
+    // sets. Scratch vectors live outside the loop so the
+    // allocator can amortise capacity across points.
+    std::size_t updates = 0;
+    std::vector<index_t> nv_total;
+    std::vector<index_t> ov_total;
+    for (std::size_t p = 0; p < n; ++p) {
+        nv_total.clear();
+        ov_total.clear();
+        nv_total.insert(nv_total.end(),
+                        new_ids[p].begin(), new_ids[p].end());
+        nv_total.insert(nv_total.end(),
+                        rev_new[p].begin(), rev_new[p].end());
+        ov_total.insert(ov_total.end(),
+                        old_ids[p].begin(), old_ids[p].end());
+        ov_total.insert(ov_total.end(),
+                        rev_old[p].begin(), rev_old[p].end());
+        // Mutual-neighbour pairs (`p ↔ q`) appear from both
+        // directions; the union can also accidentally place an
+        // id in both new and old totals when one direction had
+        // it as new and the other as old. Both cases need
+        // deduplication.
+        sort_unique(nv_total);
+        sort_unique(ov_total);
+        // Items in both totals: keep them in `new` only (the
+        // new-flagged side wins so a fresh insertion from this
+        // iteration's exchange propagates).
+        if (!nv_total.empty() && !ov_total.empty()) {
+            std::vector<index_t> dedup_old;
+            dedup_old.reserve(ov_total.size());
+            std::size_t i = 0;
+            std::size_t j = 0;
+            while (i < ov_total.size() && j < nv_total.size()) {
+                if (ov_total[i] < nv_total[j]) {
+                    dedup_old.push_back(ov_total[i]);
+                    ++i;
+                } else if (ov_total[i] > nv_total[j]) {
+                    ++j;
+                } else {
+                    ++i;
+                    ++j;  // present in both → drop from old
+                }
+            }
+            for (; i < ov_total.size(); ++i) {
+                dedup_old.push_back(ov_total[i]);
+            }
+            ov_total = std::move(dedup_old);
+        }
+
+        updates += join_pairs(ds, graph, nv_total, ov_total,
+                              distance);
+    }
+    return updates;
+}
+
 template std::size_t local_join<L2Squared>(
     const Dataset&, NnDescentGraph&, L2Squared);
 
 template std::size_t local_join<NegativeInnerProduct>(
+    const Dataset&, NnDescentGraph&, NegativeInnerProduct);
+
+template std::size_t local_join_with_reverse<L2Squared>(
+    const Dataset&, NnDescentGraph&, L2Squared);
+
+template std::size_t local_join_with_reverse<NegativeInnerProduct>(
     const Dataset&, NnDescentGraph&, NegativeInnerProduct);
 
 namespace {
@@ -257,7 +382,9 @@ Knng nn_descent_impl(const Dataset& ds,
         cfg.delta * denom;  // updates count below which we stop
 
     for (std::size_t it = 0; it < cfg.max_iters; ++it) {
-        const std::size_t updates = local_join(ds, graph, distance);
+        const std::size_t updates = cfg.use_reverse
+            ? local_join_with_reverse(ds, graph, distance)
+            : local_join(ds, graph, distance);
         const double fraction = (denom > 0.0)
             ? static_cast<double>(updates) / denom
             : 0.0;

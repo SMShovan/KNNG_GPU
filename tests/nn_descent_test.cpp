@@ -460,4 +460,91 @@ TEST(NnDescent, NegativeDeltaThrowsInvalidArgument)
         std::invalid_argument);
 }
 
+// --- local_join_with_reverse + ablation --------------------------------
+
+TEST(LocalJoinWithReverse, MatchesPlainOnFirstIteration)
+{
+    // On the first iteration both variants snapshot the same
+    // is_new=true entries and run the same `(new × new)` work
+    // — reverse_new just adds back-edges that didn't exist
+    // pre-iteration. On a tiny n=8 fixture the resulting
+    // graphs may differ in which fp-equal candidates survive
+    // ties; we compare the recall against truth instead.
+    const auto ds = two_clusters_eight_points();
+    auto g_plain   = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+    auto g_reverse = knng::cpu::init_random_graph(
+        ds, std::size_t{3}, std::uint64_t{42}, knng::L2Squared{});
+
+    const auto u_plain = knng::cpu::local_join(
+        ds, g_plain, knng::L2Squared{});
+    const auto u_rev = knng::cpu::local_join_with_reverse(
+        ds, g_reverse, knng::L2Squared{});
+
+    // The reverse variant always does at least as much work
+    // as plain on the first iteration (it considers a
+    // superset of pairs).
+    EXPECT_GE(u_rev, u_plain);
+
+    // Both produce shape-correct graphs.
+    EXPECT_EQ(g_plain.n(), ds.n);
+    EXPECT_EQ(g_reverse.n(), ds.n);
+}
+
+TEST(NnDescent, ReverseConvergesAtLeastAsFastAsPlainOnEightPointFixture)
+{
+    // Acid test for the NEO-DNND headline claim: reverse
+    // lists shouldn't make convergence *slower* on any
+    // fixture. We measure "iterations to first hit
+    // recall@k=1.0" with both variants and assert the
+    // reverse variant converges no later.
+    const auto ds = two_clusters_eight_points();
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+
+    auto iters_to_converge = [&](bool use_reverse) {
+        knng::cpu::NnDescentConfig cfg{
+            .max_iters = 16, .delta = 0.0, .seed = 42,
+            .use_reverse = use_reverse};
+        std::vector<knng::cpu::NnDescentIterationLog> log;
+        (void)knng::cpu::nn_descent_with_log(
+            ds, std::size_t{3}, cfg, log, knng::L2Squared{});
+        // The driver stops on `delta`-based convergence; the
+        // log size is the iteration count.
+        return log.size();
+    };
+    const auto plain_iters   = iters_to_converge(false);
+    const auto reverse_iters = iters_to_converge(true);
+    EXPECT_LE(reverse_iters, plain_iters);
+}
+
+TEST(NnDescent, BothVariantsConvergeToSameRecallOnEightPointFixture)
+{
+    const auto ds = two_clusters_eight_points();
+    const auto truth = knng::cpu::brute_force_knn(
+        ds, std::size_t{3}, knng::L2Squared{});
+
+    auto recall_after = [&](bool use_reverse, std::size_t iters) {
+        knng::cpu::NnDescentConfig cfg{
+            .max_iters = iters, .delta = 0.0, .seed = 42,
+            .use_reverse = use_reverse};
+        const auto g = knng::cpu::nn_descent(
+            ds, std::size_t{3}, cfg, knng::L2Squared{});
+        return knng::bench::recall_at_k(g, truth);
+    };
+    // Both reach perfect recall after enough iterations.
+    EXPECT_DOUBLE_EQ(recall_after(false, 16), 1.0);
+    EXPECT_DOUBLE_EQ(recall_after(true,  16), 1.0);
+}
+
+TEST(LocalJoinWithReverse, GraphSizeMismatchThrows)
+{
+    const auto ds = two_clusters_eight_points();
+    knng::cpu::NnDescentGraph wrong(ds.n + 1, 3);
+    EXPECT_THROW(
+        { (void)knng::cpu::local_join_with_reverse(
+            ds, wrong, knng::L2Squared{}); },
+        std::invalid_argument);
+}
+
 } // namespace

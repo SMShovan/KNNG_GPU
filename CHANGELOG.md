@@ -12,6 +12,82 @@ independent of the code diff.
 
 ---
 
+## [Step 42] — NEO-DNND optimisation 1: duplicate-request reduction (2026-05-06)
+
+### What
+- Added `include/knng/dist/request_dedup.hpp` — two primitives:
+  - `dedup_requests(requests)` — deduplicate per-rank request lists in
+    place (`std::sort` + `std::unique`); returns `DeduplicationStats`
+    with raw count, dedup count, and `reduction_fraction()` helper.
+  - `allreduce_dedup_stats(local, comm)` — aggregates per-rank stats
+    into a global total via `MPI_Allreduce`.
+  - `DeduplicationStats` struct with `reduction_fraction()` accessor.
+- Added `src/dist/request_dedup.cpp` — implementation.
+- Updated `src/dist/nn_descent_mpi.cpp`:
+  - Added `#include "knng/dist/request_dedup.hpp"`.
+  - Inserted `dedup_requests(requests)` call in the main loop between
+    `build_remote_requests` and `exchange_features`.
+  - Updated the file-level comment to document the new Step 42 step.
+- Added `tests/mpi_request_dedup_test.cpp` — six tests:
+  empty requests, no duplicates, all-duplicate single-rank, mixed
+  duplicates with ratio check, allreduce identity on single rank,
+  zero-division guard.
+- ctest 182/182 green.
+
+### Why
+This is the first of the two NEO-DNND optimisations the plan committed to
+for Phase 6. Its motivation is direct: in the Step 41 baseline, every
+neighbor-list entry that references a remote point generates one request
+— even if 20 local points all list the same global ID as a neighbor. The
+feature vector is fetched and transmitted 20 times instead of 1.
+
+The fix is trivially cheap on the sender side (sort + unique on a vector
+of at most `local_n × k` uint32_t values) and its payoff scales with the
+*graph's density*: when the graph is nearly converged and many local points
+share popular neighbors, the duplication factor can be 0.5–0.8. Early
+iterations (sparse, random graph) see lower ratios; measuring the ratio
+per iteration tracks convergence independently of the recall metric.
+
+The paper reference: NEO-DNND §3.2 "Duplicate-Request Reduction" — our
+`dedup_requests` is the direct implementation of that section's
+one-paragraph description.
+
+### Tradeoff
+- **Sort + unique vs hash-set.** A sorted-unique approach on a
+  `std::vector` is O(m log m) in the list size `m`; a hash-set is O(m)
+  average. For Phase 6's small `m` (at most a few thousand IDs per rank),
+  the sort is cache-friendlier and avoids hash-table overhead. Phase 12's
+  GPU version (Step 91) will use a bitset for truly large `m`.
+- **Dedup is now mandatory, not optional.** The `NnDescentMpiConfig` has
+  no `use_dedup` flag: deduplication is always applied. The cost is
+  trivial; the benefit is always positive. If a caller wants to measure
+  the Step 41 baseline vs Step 42 performance, they can comment out the
+  `dedup_requests` call — but there is no reason to ship a flag for it.
+- **`DeduplicationStats` logging.** The stats are computed and
+  Allreduced only when `nn_descent_mpi_with_log` is called. The
+  non-logging path (`nn_descent_mpi`) does not aggregate stats globally
+  to avoid the extra Allreduce cost on production runs.
+
+### Learning
+- **Measure what you optimise.** `reduction_fraction()` makes it trivial
+  to see whether the optimisation is actually paying off on a given
+  dataset. A ratio near 0 (no duplicates) means the graph is still
+  random; a ratio near 1 means the graph is highly clustered and the
+  same popular points are referenced by many local lists — exactly the
+  regime where NEO-DNND is designed to shine.
+- **`allreduce_dedup_stats` packs two `size_t`s into one Allreduce.**
+  Two separate Allreduce calls would have the same latency cost (each
+  blocks on a barrier) but two times the call overhead. Packing them
+  into a single 2-element message is a micro-pattern that recurs
+  throughout the distributed code.
+
+### Next
+Step 43 adds NEO-DNND optimisation 2 (intra-node shared-memory
+replication via MPI-3 SHM windows) and writes `docs/DISTRIBUTED.md`,
+the Phase 6 capstone document.
+
+---
+
 ## [Step 41] — Distributed NN-Descent (gather-scatter baseline) (2026-05-06)
 
 ### What

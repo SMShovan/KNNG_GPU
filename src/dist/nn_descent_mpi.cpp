@@ -1,13 +1,15 @@
 /// @file
-/// @brief Distributed NN-Descent — gather-scatter baseline (Step 41).
+/// @brief Distributed NN-Descent — gather-scatter + dedup (Step 42).
 ///
 /// Each iteration:
 ///   1. Build local new/old snapshots from the rank-local NnDescentGraph.
 ///   2. Determine which remote global IDs are needed (neighbors + reverse).
-///   3. AlltoAll exchange: ranks send their needed remote-ID lists; each
+///   3. **Step 42:** Deduplicate the per-rank request lists via
+///      `dedup_requests` before the MPI exchange.
+///   4. AlltoAll exchange: ranks send their needed remote-ID lists; each
 ///      rank responds with the requested feature vectors.
-///   4. Run the local join using the fetched features.
-///   5. Allreduce the update count; check convergence.
+///   5. Run the local join using the fetched features.
+///   6. Allreduce the update count; check convergence.
 
 #include "knng/dist/nn_descent_mpi.hpp"
 
@@ -21,9 +23,9 @@
 #include <vector>
 
 #include "knng/core/dataset.hpp"
-#include "knng/core/distance.hpp"
 #include "knng/cpu/neighbor_list.hpp"
 #include "knng/cpu/nn_descent.hpp"
+#include "knng/dist/request_dedup.hpp"
 #include "knng/random.hpp"
 
 namespace knng::dist {
@@ -370,6 +372,8 @@ Knng nn_descent_mpi_with_log(const ShardedDataset&         shard,
     for (std::size_t iter = 0; iter < cfg.max_iters; ++iter) {
         // Build and exchange remote feature requests.
         auto requests = build_remote_requests(graph, shard);
+        // Step 42: deduplicate before the feature exchange.
+        dedup_requests(requests);
         std::size_t bytes_sent = 0;
         auto cache = exchange_features(requests, shard, comm, bytes_sent);
 

@@ -12,6 +12,81 @@ independent of the code diff.
 
 ---
 
+## [Step 40] — Distributed brute-force KNN (ring-shift columns) (2026-05-06)
+
+### What
+- Added `include/knng/dist/brute_force_mpi.hpp` declaring:
+  - `brute_force_knn_mpi(shard, k, comm)` — ring-based exact KNN for
+    a `ShardedDataset`; returns a local `Knng` with *global* neighbor
+    indices.
+  - `gather_graph(local_graph, shard, root_rank, comm)` — collects all
+    rank-local `Knng` shards into a full `(global_n, k)` graph on the
+    root rank.
+- Added `src/dist/brute_force_mpi.cpp` — implementation using
+  `MPI_Sendrecv` for the reference-column ring and `MPI_Gatherv` for
+  graph assembly. Self-match exclusion compares global indices.
+- Added `tests/mpi_brute_force_test.cpp` — three tests:
+  - Single-rank result matches `knng::cpu::brute_force_knn` exactly.
+  - `gather_graph` produces the correct global shape.
+  - Every neighbor index in the local graph is a valid global index
+    and no row contains its own global index.
+- ctest 182/182 green (MPI targets gated as before).
+
+### Why
+After Step 39 established how data is partitioned, this step proves the
+first real distributed algorithm: exact brute-force KNN. Its value is
+**correctness infrastructure**, not performance — the ring-based exact
+result becomes the ground truth that the distributed NN-Descent (Step 41)
+and its optimisations (Steps 42–43) will be measured against.
+
+The ring algorithm is the natural choice for this level:
+- It is the simplest algorithm that avoids an AllGather of the whole
+  dataset; each rank sees all `n` reference points but only buffers
+  one shard at a time.
+- The ring structure is also the backbone of the distributed brute-force
+  GPU step (Phase 12, Step 89) — implementing and debugging it on CPU
+  means Phase 12's ring infrastructure is already understood.
+
+### Tradeoff
+- **`MPI_Sendrecv` (synchronous ring) vs pipelined async sends.**
+  `MPI_Sendrecv` blocks until both the send and the receive complete,
+  so no overlap between communication and local distance computation
+  occurs. An async pipeline (`MPI_Isend`/`MPI_Irecv` + local compute +
+  `MPI_Wait`) would hide most of the communication latency at the cost
+  of an extra buffer and more complex progress logic. That overlap is
+  deferred to Step 94 (the GPU pipeline version); here we optimize for
+  readability.
+- **`MPI_UNSIGNED` for `index_t`.** `knng::index_t = std::uint32_t`;
+  `MPI_UNSIGNED` is `unsigned int` (32-bit on LP64). This is correct on
+  all target platforms (Linux x86-64, macOS arm64, Linux aarch64), but
+  a portable alternative is `MPI_UINT32_T` (available in MPI-3). We
+  use `MPI_UNSIGNED` for readability and note the assumption in the
+  gather code.
+- **Separate Gatherv for indices and distances.** Packing them into a
+  single interleaved message would require a custom `MPI_Type_create_struct`
+  or a scratch buffer. The two-pass approach is simpler and the extra
+  round-trip cost is negligible for correctness testing.
+
+### Learning
+- The ring communication pattern exactly mirrors the Phase-12 GPU
+  ring: ranks form a circular shift network, and each step transfers
+  one `n/P`-row reference shard. The key insight is that the ring
+  structure keeps *peak memory* at `O(n/P)` per rank while still
+  exposing every rank to every reference point — a strict improvement
+  over AllGather's `O(n)` peak memory when `P` is large.
+- Self-match exclusion in a distributed setting requires *global*
+  index comparison, not local. Comparing `r_local_i == q_local_i`
+  would produce wrong exclusions whenever the query and reference
+  live on different ranks. The `global_index(qi)` → `ring_start + ri`
+  comparison is the correct check.
+
+### Next
+Step 41 introduces distributed NN-Descent on the same `ShardedDataset`
+primitive, using a gather-scatter per iteration as the correctness
+baseline (deliberately inefficient; Steps 42–43 will optimise it).
+
+---
+
 ## [Step 39] — Point-sharded dataset (2026-05-06)
 
 ### What

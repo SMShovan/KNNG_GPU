@@ -308,4 +308,30 @@ if(KNNG_HAVE_MPI)
             DISCOVERY_TIMEOUT 10
         )
     endif()
+
+    # `test_mpi_brute_force` — Step 40: distributed brute-force KNN.
+    add_executable(test_mpi_brute_force mpi_brute_force_test.cpp)
+    target_link_libraries(test_mpi_brute_force
+        PRIVATE
+            knng::dist
+            GTest::gtest_main
+    )
+    knng_set_warnings(test_mpi_brute_force)
+    set_target_properties(test_mpi_brute_force PROPERTIES
+        OUTPUT_NAME "test_mpi_brute_force")
+
+    if(MPIRUN_EXEC)
+        add_test(
+            NAME    mpi_brute_force
+            COMMAND "${MPIRUN_EXEC}" -np 1
+                    "$<TARGET_FILE:test_mpi_brute_force>"
+        )
+        set_tests_properties(mpi_brute_force PROPERTIES LABELS "mpi;dist")
+    else()
+        gtest_discover_tests(test_mpi_brute_force
+            PROPERTIES
+                LABELS "mpi;dist"
+            DISCOVERY_TIMEOUT 10
+        )
+    endif()
 endif()

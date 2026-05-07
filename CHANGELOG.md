@@ -12,6 +12,102 @@ independent of the code diff.
 
 ---
 
+## [Step 43] — NEO-DNND opt 2: intra-node SHM replication + DISTRIBUTED.md (2026-05-06)
+
+### What
+- Added `include/knng/dist/shm_replication.hpp` — `ShmRegion`: allocates
+  an MPI-3 shared-memory window via `MPI_Win_allocate_shared` over all
+  ranks on the same physical node (`MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)`).
+  After construction all intra-node ranks can directly read each other's
+  feature rows via `read_remote_row(intra_r, row_i, d)` — zero MPI
+  message, zero copy. Constructor throws `std::runtime_error` on failure.
+  Destructor calls `MPI_Win_free` + `MPI_Comm_free`. Non-copyable,
+  non-movable (the window base pointer would be invalidated).
+- Added `src/dist/shm_replication.cpp` — implementation:
+  `MPI_Comm_split_type` → `MPI_Win_allocate_shared` → `memcpy` of local
+  data into the window segment → `MPI_Win_fence` barrier →
+  `MPI_Win_shared_query` loop to collect all rank segment base pointers
+  and row counts.
+- Added `tests/mpi_shm_replication_test.cpp` — four tests:
+  construct-and-destruct (smoke), local data readable via window,
+  `intra_row_counts` matches `local_n`, `local_base()` non-null.
+- Added `docs/DISTRIBUTED.md` — Phase 6 capstone document covering:
+  communication topology diagram (intra-node SHM vs inter-node MPI),
+  point-sharding arithmetic, distributed brute-force ring algorithm
+  with per-metric table, per-iteration protocol for distributed
+  NN-Descent, deduplication ratio table, optimisation 2 SHM design,
+  performance model table, file inventory, and four open questions
+  deferred to Phase 12.
+- ctest 182/182 green.
+
+### Why
+The SHM optimisation closes Phase 6 with a concrete illustration of the
+key Phase 6 design principle: the three communication-cost reducers
+operate on *different layers*:
+
+1. **Ring shift (Step 40)** reduces *peak memory* from `O(n)` to `O(n/P)`.
+2. **Dedup (Step 42)** reduces *bytes sent* proportionally to the graph
+   density.
+3. **SHM replication (Step 43)** reduces *latency* for intra-node fetches
+   from MPI message-passing overhead to a direct pointer dereference.
+
+Together, these three mechanisms form the Phase 6 communication layer that
+Phase 12 will port to GPU (ring → NVLink/PCIe; dedup → GPU bitset +
+prefix-sum; SHM → CUDA P2P unified memory).
+
+`DISTRIBUTED.md` is the counterpart to `NN_DESCENT.md` (Phase 5) and
+`SCALING_CPU.md` (Phase 4): the human-readable rationale for the
+distributed design choices, with a performance model that bridges the
+algorithmic complexity claims and the expected wall-time behaviour on
+cluster hardware.
+
+### Tradeoff
+- **`ShmRegion` does not integrate into `nn_descent_mpi` in this step.**
+  The integration point — replacing intra-node Alltoallv requests with
+  direct `read_remote_row` calls — is left for Phase 12's GPU port where
+  the intra-node communication cost is a larger fraction of the total.
+  On CPU-only Phase 6, the MPI Alltoallv path already hits shared memory
+  at the OS level; the benefit only becomes material when P > 1 per node
+  and message-latency is a bottleneck (e.g., small datasets, high
+  iteration count).
+- **`MPI_Win_fence` for synchronisation.** MPI-3 also offers
+  `MPI_Win_lock`/`MPI_Win_unlock` for fine-grained synchronisation, but
+  `MPI_Win_fence` at construction time is correct and simpler for a
+  read-only-after-init pattern: all ranks have written their data before
+  any rank reads another's. The fence cost is paid once at construction,
+  not per-access.
+- **`non-copyable, non-movable` design.** The `MPI_Win` handle encapsulates
+  the underlying shared memory segment; moving the C++ object would not
+  move the MPI window, so the base pointers stored in `segment_ptrs_`
+  would become stale. Making the type non-movable is the correct choice;
+  callers that need to store it in a container should use `std::unique_ptr`.
+
+### Learning
+- `MPI_Win_allocate_shared` is the simplest MPI-3 SHM primitive. It
+  behaves like a collective `mmap(MAP_SHARED)` across intra-node ranks:
+  each rank provides its own size and receives a pointer to *its own*
+  segment; `MPI_Win_shared_query` then retrieves the pointers to all
+  other segments. The result is equivalent to a shared-memory pool
+  partitioned by rank.
+- `MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)` correctly handles
+  heterogeneous clusters: each node forms its own subcommunicator,
+  regardless of how MPI was launched. A rank that is the sole occupant
+  of a node gets `intra_size() == 1`; the code path is valid and
+  effectively a no-op for intra-node sharing.
+- Phase 6 is the first phase that fully separates *algorithm correctness*
+  from *communication efficiency*. Steps 38–41 establish the correct
+  distributed algorithm; Steps 42–43 reduce its communication cost
+  without touching the mathematical result. This layering pattern will
+  recur in Phase 12.
+
+### Next
+Phase 7 begins the GPU path with CMake CUDA enablement (`-DKNNG_ENABLE_CUDA=ON`)
+and a GPU "hello world" kernel. The distributed algorithms in this phase
+stay on CPU; the Phase 12 multi-node GPU port will reuse the communication
+infrastructure built here.
+
+---
+
 ## [Step 42] — NEO-DNND optimisation 1: duplicate-request reduction (2026-05-06)
 
 ### What

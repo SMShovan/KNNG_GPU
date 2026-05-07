@@ -243,3 +243,43 @@ gtest_discover_tests(test_nn_descent
         LABELS "nn_descent"
     DISCOVERY_TIMEOUT 10
 )
+
+# `test_mpi_env` exercises `knng::dist::MpiEnv` (Step 38).
+# Launched via `mpirun -np 1` so CTest can run it without a full
+# multi-rank setup. MPI_Allreduce with one rank degenerates to a
+# local identity, which validates the MPI wiring end-to-end.
+# Only built when `KNNG_HAVE_MPI` is ON.
+if(KNNG_HAVE_MPI)
+    find_program(MPIRUN_EXEC
+        NAMES mpirun mpiexec
+        DOC   "MPI launcher for test_mpi_env")
+
+    add_executable(test_mpi_env mpi_env_test.cpp)
+    target_link_libraries(test_mpi_env
+        PRIVATE
+            knng::dist
+            GTest::gtest_main
+    )
+    knng_set_warnings(test_mpi_env)
+    set_target_properties(test_mpi_env PROPERTIES
+        OUTPUT_NAME "test_mpi_env")
+
+    if(MPIRUN_EXEC)
+        # Register the test to run under `mpirun -np 1`.
+        add_test(
+            NAME    mpi_env
+            COMMAND "${MPIRUN_EXEC}" -np 1
+                    "$<TARGET_FILE:test_mpi_env>"
+                    --gtest_output=xml:${CMAKE_BINARY_DIR}/test_results/mpi_env.xml
+        )
+        set_tests_properties(mpi_env PROPERTIES LABELS "mpi;dist")
+    else()
+        # No launcher found — register a direct invocation (works for
+        # single-process MPI implementations that don't need mpirun).
+        gtest_discover_tests(test_mpi_env
+            PROPERTIES
+                LABELS "mpi;dist"
+            DISCOVERY_TIMEOUT 10
+        )
+    endif()
+endif()

@@ -41,6 +41,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 include(CompilerWarnings)
 include(FindKnngBlas)
 include(FindKnngOpenMP)
+include(FindKnngMPI)
 
 # Generate include/knng/version.hpp from the template.
 configure_file(
@@ -70,6 +71,9 @@ add_library(knng::headers ALIAS knng_headers)
 # pulled in unconditionally — its own CMakeLists.txt gates the
 # `docs` target on whether Doxygen is installed.
 add_subdirectory(src)
+if(KNNG_HAVE_MPI)
+    add_subdirectory(src/dist)
+endif()
 add_subdirectory(tools)
 add_subdirectory(docs)
 
@@ -116,5 +120,6 @@ message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_
 message(STATUS "  binary dir    : ${CMAKE_BINARY_DIR}")
 message(STATUS "  blas (Step 21): ${KNNG_HAVE_BLAS}")
 message(STATUS "  openmp (S24+) : ${KNNG_HAVE_OPENMP}")
+message(STATUS "  mpi   (S38+)  : ${KNNG_HAVE_MPI}")
 message(STATUS "------------------------------------")
 message(STATUS "")

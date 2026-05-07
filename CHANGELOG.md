@@ -12,6 +12,110 @@ independent of the code diff.
 
 ---
 
+## [Step 38] — MPI hello world + CMake integration (2026-05-06)
+
+### What
+- Added `cmake/FindKnngMPI.cmake` — discovers an MPI CXX
+  implementation via CMake's built-in `FindMPI` module. Follows the
+  same pattern as `FindKnngOpenMP.cmake`: `KNNG_ENABLE_MPI` opt-in
+  option, `KNNG_HAVE_MPI` cache variable, `knng::mpi_iface` INTERFACE
+  alias that propagates `MPI::MPI_CXX` and the `KNNG_HAVE_MPI=1`
+  compile definition to every consumer. When MPI is absent the module
+  emits a status message and sets `KNNG_HAVE_MPI=OFF`; the non-MPI
+  build continues unchanged.
+- Added `include/knng/dist/mpi_env.hpp` — `knng::dist::MpiEnv`, an
+  RAII guard that calls `MPI_Init_thread(MPI_THREAD_FUNNELED)` on
+  construction and `MPI_Finalize()` on destruction. Non-copyable,
+  move-constructible (moved-from instance becomes inert). Public
+  surface: `rank()`, `size()`, `is_root()`, `thread_support()`,
+  `barrier()`.
+- Added `src/dist/mpi_env.cpp` — out-of-line implementation of
+  `MpiEnv`. Throws `std::runtime_error` on double-init or on
+  `MPI_Init_thread` failure, so MPI errors are caught at construction
+  rather than silently proceeding.
+- Added `src/dist/CMakeLists.txt` — `knng::dist` STATIC library
+  target. Currently contains only `mpi_env.cpp`; Phase 6's remaining
+  steps will extend the source list incrementally.
+- Updated root `CMakeLists.txt`: added `include(FindKnngMPI)`,
+  conditionally added `src/dist/` subdirectory, and added `mpi`
+  line to the build summary.
+- Added `tests/mpi_env_test.cpp` — six-test suite covering
+  `rank()`-in-range, `is_root()`-matches-rank, `size()`-positive,
+  allreduce-sum correctness, barrier non-deadlock, and
+  double-init-throws. Registered in `tests/CMakeLists.txt` via
+  `mpirun -np 1` when a launcher is found, or via `gtest_discover_tests`
+  otherwise; only built when `KNNG_HAVE_MPI=ON`.
+- ctest 182/182 green (non-MPI tests unaffected; MPI targets gated).
+
+### Why
+Phase 5 closed with an eight-step NN-Descent implementation running
+on a single CPU. Phase 6's goal is to add a second independent axis
+of parallelism — distributed-memory across MPI ranks — *before*
+introducing GPUs, so that the distributed algorithm can be understood
+and debugged on familiar CPU semantics. That learning carries directly
+into Phase 12's MPI+GPU design.
+
+This first step establishes the same infrastructure prerequisite that
+Step 01 established for the whole project: the build must know about
+the new dependency, and a smoke test must prove the dependency is
+wired end-to-end before any algorithmic code is written. The exact same
+pattern was used for OpenMP (Step 24) and BLAS (Step 20): find the
+library, expose an INTERFACE alias, gate everything on a cache variable,
+test the integration with the simplest possible exerciser (allreduce
+sum).
+
+The `MPI_THREAD_FUNNELED` thread level matches Phase 6's single-
+threaded communication model: all MPI calls will originate from the
+main thread. Phase 12 may upgrade to `MPI_THREAD_MULTIPLE` when async
+progress threads are introduced; fixing the level now prevents a
+silent later breakage.
+
+### Tradeoff
+- **No MPI on the Mac dev machine.** `FindKnngMPI` gracefully skips
+  the `knng::dist` targets when MPI is not found, so `cmake +
+  ctest` on the laptop stays green. The distributed code will first
+  compile and run on a Linux cluster with OpenMPI or MPICH installed.
+  This is the same posture taken for GPU code (Phase 7+): write the
+  code, prove it builds on target hardware when available.
+- **`MPI_THREAD_FUNNELED` vs `MPI_THREAD_MULTIPLE`.** `FUNNELED` is
+  the minimum required for Phase 6 and avoids the implementation
+  complexity that `MULTIPLE` can introduce (some MPI libraries
+  serialize all operations under `MULTIPLE`, negating any benefit).
+  The request level is a single constant in `mpi_env.cpp`; upgrading
+  is a one-line change with a clear comment trail.
+- **Double-init throws rather than silently becoming a no-op.** A
+  no-op would hide logical bugs (two `MpiEnv` objects in scope,
+  likely by accident). Throwing at construction makes the bug
+  immediately visible, at the cost of not supporting the pattern
+  where the environment is re-initialised (which MPI does not
+  support anyway).
+
+### Learning
+- CMake's `FindMPI` module is well-maintained and handles
+  OpenMPI, MPICH, Intel MPI, and MVAPICH. Wrapping it in a thin
+  module (rather than calling it directly from root) follows the
+  same separation-of-concerns argument as `FindKnngOpenMP`: the
+  project-level option (`KNNG_ENABLE_MPI`) and the target alias
+  (`knng::mpi_iface`) are the project's own abstractions; the
+  discovery mechanism is delegated to CMake.
+- The `MPI_Initialized` guard in the constructor is critical for
+  test harnesses: some MPI testing patterns (e.g., test fixtures
+  with static env objects) can inadvertently construct `MpiEnv`
+  twice. Making the guard explicit converts a silent deadlock or
+  segfault into a readable `std::runtime_error`.
+- Gating test registration on `MPIRUN_EXEC` found vs not-found allows
+  the same test target to be CTest-registered in both environments
+  (cluster with `mpirun` and single-process build where `mpirun -np 1`
+  is unnecessary overhead).
+
+### Next
+Step 39 adds `knng::dist::ShardedDataset` — the distributed-memory
+view of a dataset where each rank owns `n/P` rows and knows how to
+scatter / gather with its peers. This is the primitive that all later
+distributed algorithms operate on.
+
+---
+
 ## [Step 37] — NN-Descent recall writeup (Phase 5 closing artefact) (2026-05-05)
 
 ### What

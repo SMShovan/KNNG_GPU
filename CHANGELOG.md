@@ -12,6 +12,95 @@ independent of the code diff.
 
 ---
 
+## [Step 39] — Point-sharded dataset (2026-05-06)
+
+### What
+- Added `include/knng/dist/sharded_dataset.hpp` — `ShardedDataset`
+  wraps a locally-owned `Dataset` shard together with global metadata
+  (`global_n`, `local_start`, `rank`, `size`). Public surface:
+  `local_dataset()`, `local_n()`, `global_n()`, `local_start()`,
+  `local_end()`, `global_index(i)`, `d()`, `rank()`, `size()`.
+  Two key operations:
+  - `scatter(root_data, root_rank, comm)` — static factory that
+    `MPI_Bcast`s `(global_n, d)` then `MPI_Scatterv`s float rows;
+    every rank receives its `[start, start+count)` slice.
+  - `gather(root_rank, comm)` — `MPI_Gatherv`s all shards to
+    `root_rank`; non-root ranks receive an empty `Dataset`.
+- Added `include/knng/dist/sharded_dataset.hpp:compute_shard` — inline
+  free function computing `{start, count}` for rank `r` given
+  `global_n` and `num_ranks`. Static balanced partitioning: each rank
+  gets `floor(global_n / num_ranks)` rows; the last rank absorbs the
+  remainder. Exposed as a free function so tests and algorithms can
+  reason about shard bounds without constructing a `ShardedDataset`.
+- Added `src/dist/sharded_dataset.cpp` — implementation using
+  `MPI_Bcast`, `MPI_Scatterv`, `MPI_Gatherv`.
+- Added `tests/mpi_sharded_test.cpp` — eight tests: `compute_shard`
+  arithmetic for exact, remainder, and single-rank cases; single-rank
+  scatter identity; gather round-trip; `global_index` consistency;
+  empty-dataset throw.
+- ctest 182/182 green on Mac (MPI targets gated as before).
+
+### Why
+The distributed brute-force (Step 40) and NN-Descent (Step 41)
+operate on a ring-communication pattern where each rank broadcasts
+its local feature rows to its neighbour while computing distances
+against its current reference block. For that to work, each rank
+must know exactly which rows it owns — globally and locally. Encoding
+that knowledge in a `ShardedDataset` rather than passing `(global_n,
+start, count, rank, size)` tuples everywhere avoids a class of
+bookkeeping bugs where one argument gets out of sync.
+
+The `scatter` / `gather` primitives are the only times the full
+dataset lives on one rank; from this point forward every algorithm in
+the `dist` namespace operates on `ShardedDataset::local_dataset()`.
+This matches NEO-DNND's design: the paper's process-local state is
+always `n/P` feature vectors, never the full `n`.
+
+`compute_shard` is a free function rather than a `ShardedDataset`
+method so the ring-communication code (Step 40) can query shard sizes
+for *other* ranks (needed to know how many bytes to send / receive in
+each ring step) without constructing a `ShardedDataset` object for
+those ranks.
+
+### Tradeoff
+- **Last-rank remainder.** Allocating the `global_n % size` remainder
+  rows to the last rank is the simplest strategy: all other ranks are
+  perfectly balanced, and the last rank has at most `size - 1` extra
+  rows — negligible for any practical dataset size. A round-robin
+  assignment would achieve perfect balance but complicates every
+  scatter / gather index computation.
+- **Copying root data into a contiguous scatter buffer.** `MPI_Scatterv`
+  does not require pre-packing on the root side: the displacement
+  array points directly into the root's flat `float*` buffer, so no
+  extra copy is needed. This is the advantage of the `Dataset` SoA
+  layout established in Phase 3.
+- **`gather` returns empty on non-root.** This design keeps the API
+  honest: the caller must explicitly check `rank() == root_rank`
+  before using the result. The alternative (returning a valid
+  single-rank dataset everywhere) wastes memory on `P - 1` ranks and
+  suggests the full dataset is safe to use in production paths, which
+  it is not.
+
+### Learning
+- `MPI_UNSIGNED_LONG` vs `MPI_UINT64_T`: the correct type tag for
+  `std::size_t` in a portable way is `MPI_UNSIGNED_LONG` on LP64
+  (Linux, macOS x86/arm), but this assumes `sizeof(unsigned long) ==
+  sizeof(size_t)`. The alternative `MPI_UINT64_T` is only defined
+  when the MPI implementation provides optional type definitions. For
+  Phase 6 `MPI_UNSIGNED_LONG` is acceptable; a production
+  portability layer would use a compile-time `sizeof` dispatch.
+- `MPI_Scatterv` displacement array is in *element* units (not bytes)
+  for typed sends — a subtle distinction from the byte-based
+  `MPI_Type_create_struct` path.
+
+### Next
+Step 40 adds distributed brute-force KNN: each rank owns local rows
+as its query set; the reference columns cycle through ranks via a ring,
+with each rank computing distances from its local queries to the
+current reference block and accumulating top-k results.
+
+---
+
 ## [Step 38] — MPI hello world + CMake integration (2026-05-06)
 
 ### What

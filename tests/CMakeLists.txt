@@ -282,4 +282,30 @@ if(KNNG_HAVE_MPI)
             DISCOVERY_TIMEOUT 10
         )
     endif()
+
+    # `test_mpi_sharded` — Step 39: ShardedDataset scatter/gather.
+    add_executable(test_mpi_sharded mpi_sharded_test.cpp)
+    target_link_libraries(test_mpi_sharded
+        PRIVATE
+            knng::dist
+            GTest::gtest_main
+    )
+    knng_set_warnings(test_mpi_sharded)
+    set_target_properties(test_mpi_sharded PROPERTIES
+        OUTPUT_NAME "test_mpi_sharded")
+
+    if(MPIRUN_EXEC)
+        add_test(
+            NAME    mpi_sharded
+            COMMAND "${MPIRUN_EXEC}" -np 1
+                    "$<TARGET_FILE:test_mpi_sharded>"
+        )
+        set_tests_properties(mpi_sharded PROPERTIES LABELS "mpi;dist")
+    else()
+        gtest_discover_tests(test_mpi_sharded
+            PROPERTIES
+                LABELS "mpi;dist"
+            DISCOVERY_TIMEOUT 10
+        )
+    endif()
 endif()

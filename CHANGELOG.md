@@ -12,6 +12,95 @@ independent of the code diff.
 
 ---
 
+## [Step 41] — Distributed NN-Descent (gather-scatter baseline) (2026-05-06)
+
+### What
+- Added `include/knng/dist/nn_descent_mpi.hpp` declaring:
+  - `NnDescentMpiConfig` — tuning knobs: `max_iters`, `delta`, `seed`,
+    `use_reverse`, `rho`.
+  - `NnDescentMpiLog` — per-iteration stats: `iteration`,
+    `global_updates`, `update_fraction`, `bytes_sent`.
+  - `nn_descent_mpi(shard, k, cfg, comm)` — convergence-driven driver.
+  - `nn_descent_mpi_with_log(...)` — same driver, writes per-iteration
+    statistics to a caller-provided vector.
+- Added `src/dist/nn_descent_mpi.cpp` — implementation of the
+  gather-scatter protocol:
+  1. Each rank builds a per-rank request list of remote global IDs
+     referenced in its local neighbor lists (`build_remote_requests`).
+  2. `exchange_features` performs 3 MPI rounds: `MPI_Alltoall` for
+     counts, `MPI_Alltoallv` for ID lists, `MPI_Alltoallv` for the
+     feature-vector responses. Returns a `global_id → feature_vector`
+     cache covering every ID needed locally this iteration.
+  3. `local_join_distributed` runs the new×new + new×old pair
+     enumeration using the feature cache, updating any locally-owned
+     neighbor lists.
+  4. `MPI_Allreduce` sums per-rank update counts for the global
+     convergence check.
+  Random initialization: each rank seeds independently (`cfg.seed
+  XOR (rank * golden_ratio_const)`) and draws random global IDs.
+- Added `tests/mpi_nn_descent_test.cpp` — three tests:
+  - Single-rank: converges on a clustered dataset with recall ≥ 0.6.
+  - Local graph shape matches `(shard.local_n(), k)`.
+  - Log output records ≥ 1 entry with 1-based monotone iteration numbers.
+- ctest 182/182 green.
+
+### Why
+Step 40 proved that distributed data movement is correct for exact
+distances. Step 41 lifts the approximate algorithm onto the same
+infrastructure. The deliberate inefficiency of the gather-scatter
+approach — sending feature vectors for every referenced ID without
+deduplication — is a feature of this step, not a bug: it establishes
+the *unoptimised communication floor* against which Steps 42 and 43
+will measure their improvements.
+
+This mirrors the structure of NEO-DNND's own presentation (§3.2):
+the paper first characterises the naïve approach ("in each iteration,
+every rank sends the features of all IDs its neighbors reference to
+every other rank") and then quantifies the duplication factor. Our
+implementation of that naïve baseline is the code that the NEO-DNND
+optimisations are measured against in the actual paper.
+
+### Tradeoff
+- **Gather-scatter uses `unordered_map<index_t, vector<float>>` as the
+  feature cache.** A flat `float[]` with a separate index table would
+  be more cache-friendly, but the map is correct and transparent. Phase
+  12's GPU version will use a flat device-side buffer; the map here is
+  the pedagogical shape.
+- **Random initialisation uses placeholder distance 0.0f.** Every entry
+  starts flagged `is_new = true` so the first iteration's local join
+  recomputes all distances. A better init would scatter the actual
+  distances, but that requires an extra feature-exchange round before
+  the first iteration — out of scope for Step 41.
+- **`use_reverse = true` in `NnDescentMpiConfig` but not yet wired into
+  `local_join_distributed`.** The local join in this step does not build
+  reverse-neighbour lists; it only processes forward-neighbour pairs.
+  Reverse lists in the distributed setting require fetching the reverse
+  entries' feature vectors too, which is the request-deduplication
+  problem Step 42 addresses. The flag is present in `NnDescentMpiConfig`
+  so Step 42 can gate on it without changing the API.
+
+### Learning
+- The three-round MPI exchange (`counts → IDs → features`) is the
+  canonical pattern for distributed data fetching with irregular access.
+  The same three-round structure appears in Phase 12's NEO-DNND GPU
+  implementation (§4.1), making this CPU baseline a direct pedagogical
+  predecessor.
+- `MPI_Alltoall` for the counts + `MPI_Alltoallv` for the data is a
+  well-known pattern for variable-length exchanges. The alternative —
+  a single `MPI_Allgather` of a dense `(n, d)` feature matrix —
+  would use `O(P * n * d)` total bytes vs `O(n * d)` here.
+- The convergence check via `MPI_Allreduce(MPI_SUM)` is the natural
+  distributed analogue of the serial `n_updates / (n * k) < delta`
+  test. The global sum is exact; no approximation is introduced.
+
+### Next
+Step 42 adds the first NEO-DNND optimisation: before sending feature
+requests, each rank deduplicates the set of remote IDs it needs (many
+will overlap across its local neighbor entries). The commit benchmarks
+the reduction in total bytes sent.
+
+---
+
 ## [Step 40] — Distributed brute-force KNN (ring-shift columns) (2026-05-06)
 
 ### What

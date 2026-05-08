@@ -9,6 +9,7 @@
 
 set(_knng_gpu_sources
     hello_cuda.cu
+    distance_kernel.cu    # Step 47: naive pairwise L2² kernel
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})
@@ -16,6 +17,7 @@ add_library(knng_gpu STATIC ${_knng_gpu_sources})
 target_link_libraries(knng_gpu
     PUBLIC
         knng::core
+        knng::gpu_ref       # CPU reference implementations (always compiled)
         knng::cuda_iface
         CUDA::cudart
 )

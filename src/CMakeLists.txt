@@ -63,3 +63,14 @@ add_library(knng_bench STATIC
 target_link_libraries(knng_bench PUBLIC knng::cpu)
 knng_set_warnings(knng_bench)
 add_library(knng::bench ALIAS knng_bench)
+
+# `knng::gpu_ref` — CPU-reference implementations of GPU algorithms.
+# Always compiled (no CUDA dependency) so that tests on Mac and CPU-only
+# CI can run the correctness oracle paths.  When CUDA is enabled, the
+# real GPU kernels in knng::gpu link against this library transitively.
+add_library(knng_gpu_ref STATIC
+    gpu/distance_cpu_ref.cpp
+)
+target_link_libraries(knng_gpu_ref PUBLIC knng::core)
+knng_set_warnings(knng_gpu_ref)
+add_library(knng::gpu_ref ALIAS knng_gpu_ref)

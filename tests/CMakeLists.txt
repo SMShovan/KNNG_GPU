@@ -249,6 +249,24 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_distance` — Step 47: naive pairwise L2² distance kernel.
+# Links knng::gpu_ref (CPU reference — always available).
+add_executable(test_gpu_distance gpu_distance_test.cpp)
+target_link_libraries(test_gpu_distance
+    PRIVATE
+        knng::gpu_ref
+        GTest::gtest_main
+)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_distance PRIVATE knng::gpu CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_distance)
+set_target_properties(test_gpu_distance PROPERTIES OUTPUT_NAME "test_gpu_distance")
+gtest_discover_tests(test_gpu_distance
+    PROPERTIES LABELS "gpu;distance"
+    DISCOVERY_TIMEOUT 10
+)
+
 # `test_device_buffer` — Step 46: DeviceBuffer<T> RAII wrapper.
 add_executable(test_device_buffer device_buffer_test.cpp)
 target_link_libraries(test_device_buffer

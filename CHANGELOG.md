@@ -12,6 +12,68 @@ independent of the code diff.
 
 ---
 
+## [Step 47] — Naive GPU distance kernel (2026-05-07)
+
+### What
+- Added `include/knng/gpu/distance_kernel.hpp`: declares
+  `cpu_pairwise_l2sq` (always compiled CPU reference) and, under
+  `KNNG_HAVE_CUDA/HIP` guards, `naive_pairwise_l2sq_kernel` (GPU kernel)
+  and `gpu_pairwise_l2sq` (host launcher). Layout convention documented:
+  row-major `[nq][d]` queries, `[nr][d]` refs, `[nq][nr]` output.
+- Added `src/gpu/distance_cpu_ref.cpp`: plain C++ triple-loop
+  implementation of pairwise squared-L2, compiled into the new
+  `knng::gpu_ref` STATIC library (always built, no CUDA dependency).
+- Added `src/gpu/distance_kernel.cu` (CUDA-only): `naive_pairwise_l2sq_kernel`
+  assigns one thread per `(qi, ri)` pair; `gpu_pairwise_l2sq` wraps
+  the kernel with `DeviceBuffer` allocations, H2D copies, launch, and
+  D2H readback.  Thread block is `16×16`, grid is ceiling-divided.
+- Updated `src/CMakeLists.txt`: added `knng::gpu_ref` STATIC library
+  (sources: `gpu/distance_cpu_ref.cpp`). Updated `src/gpu/CMakeLists.txt`
+  to add `distance_kernel.cu` and link `knng::gpu_ref`.
+- Added `tests/gpu_distance_test.cpp`: 7 tests — self-distance zero,
+  1-D two-point, 3-D two-point, full 2×3 matrix, symmetry property,
+  diagonal zero, 128-D unit-basis vectors. Plus one `GpuMatchesCpu`
+  test guarded by `#ifdef KNNG_HAVE_CUDA`. All 7 CPU-reference tests
+  pass on Mac.
+- Total tests: 210 (all passing).
+
+### Why
+The naive kernel is the "GPU Step 10" — correct, readable, and deliberately
+suboptimal.  Having it committed establishes:
+1. A Nsight Compute baseline occupancy / bandwidth reading (Step 51).
+2. A correctness oracle (CPU vs GPU) that every subsequent kernel variant
+   in Phase 8 must match.
+3. The `knng::gpu_ref` / `knng::gpu` split: CPU reference always available
+   for testing on Mac; GPU library opt-in when CUDA is present.
+
+### Tradeoff
+- **One thread per pair, no shared memory.** Each thread independently
+  loads `d` floats from global memory for both query and reference — O(d)
+  global loads per thread, with zero reuse.  Phase 8 Step 52 will tile
+  the reference matrix into shared memory, reducing global load count by
+  a factor equal to the tile width.
+- **`dim3(16,16)` block.** 256 threads per block is a reasonable default
+  for occupancy on Volta–Hopper (they all have 2048 max threads per SM).
+  The optimal value is architecture-dependent and will be tuned in Phase 8.
+
+### Learning
+- Separating the CPU reference (`.cpp`) from the GPU kernel (`.cu`) into
+  distinct translation units is cleaner than `#ifdef` guards inside the
+  `.cu` file and allows `knng::gpu_ref` to be linked without the CUDA
+  toolchain, keeping the Mac build fully exercisable.
+- The `GPU_LAUNCH` macro in `backend.hpp` handles `cudaGetLastError()`
+  immediately after the launch — this catches asynchronous kernel errors
+  that would otherwise only surface at the next synchronisation point,
+  which makes debugging much easier.
+
+### Next
+Step 48 implements thread-per-query brute-force KNN: each thread owns one
+query, iterates over all references, and maintains a register-resident
+top-k list using insertion sort.  This is the first full KNN kernel,
+limited to k ≤ 32 by the register budget.
+
+---
+
 ## [Step 46] — `DeviceBuffer<T>` RAII (2026-05-07)
 
 ### What

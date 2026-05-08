@@ -12,6 +12,71 @@ independent of the code diff.
 
 ---
 
+## [Step 48] — Thread-per-query GPU brute-force KNN (2026-05-07)
+
+### What
+- Added `include/knng/gpu/brute_force.hpp`: unified header declaring
+  `cpu_brute_force_knn` (CPU reference, always compiled), plus
+  `brute_force_thread_knn`, `brute_force_block_knn`, and
+  `gpu_brute_force_knn` (GPU launchers, guarded by
+  `KNNG_HAVE_CUDA / KNNG_HAVE_HIP`).
+- Added `src/gpu/brute_force_cpu_ref.cpp`: exact brute-force KNN using
+  `TopK` heap, compiled into `knng::gpu_ref` (no CUDA dependency).
+- Added `src/gpu/brute_force_thread.cu` (CUDA-only):
+  `brute_force_thread_kernel` — one thread per query; register-resident
+  insertion-sort top-k (limit: k ≤ 32 before register spill becomes
+  severe); `brute_force_thread_knn` host launcher with `DeviceBuffer`
+  allocations.
+- Added `tests/gpu_brute_force_thread_test.cpp`: 4 CPU-reference tests
+  (2-point 1-D, 8-point cluster, sorted-distances, k=n-1) plus one
+  GPU-vs-CPU comparison test guarded by `#ifdef KNNG_HAVE_CUDA`.
+- Updated `src/CMakeLists.txt`: added `brute_force_cpu_ref.cpp` to
+  `knng_gpu_ref` sources. Updated `src/gpu/CMakeLists.txt` to add
+  `brute_force_thread.cu`.
+- Total tests: 214 (all passing).
+
+### Why
+Having a complete GPU KNN path — from `Dataset` to `Knng` in one call —
+is the goal of Phase 7. The thread-per-query kernel is the simplest
+possible embodiment: it proves the data-flow (`DeviceBuffer` → kernel →
+`Knng`) end-to-end before the block-level coordination of Step 49 adds
+complexity.
+
+The k ≤ 32 register limit is a deliberate constraint rather than a bug.
+On Volta and later, each SM has 65 536 32-bit registers shared among all
+threads.  A `16×16×2` top-k array (k=32, ids + dists) occupies 64
+registers per thread; at 128 threads per block that is 8 192 registers,
+keeping occupancy high.  Exceeding k=32 would force register spilling into
+local memory (L1-backed), which the block-per-query design avoids by
+using shared memory instead.
+
+### Tradeoff
+- **Register pressure at k > 32.** The insertion-sort arrays are
+  statically allocated as register variables, so `k` must be known at
+  compile time for full efficiency — or the compiler spills to local
+  memory.  The `kMaxKThread = 32` guard prevents silent performance
+  degradation.
+- **Linear-scan insertion sort.** For k ≤ 32 insertion sort has lower
+  overhead than a heap (no pointer chasing, fully unrollable by the
+  compiler). Above k ~ 64 a binary-search insert would be faster; this
+  is irrelevant here given the k ≤ 32 regime.
+
+### Learning
+- `__forceinline__` on the `insert_top_k` device function is important:
+  without it `nvcc` may not inline the function, causing register
+  pressure to collapse (the function parameters need stack space).
+- The `GPU_INLINE` macro from `backend.hpp` maps to `__forceinline__`
+  under CUDA and plain `inline` on CPU stub — the same source works
+  in both contexts without conditional compilation.
+
+### Next
+Step 49 adds the block-per-query brute-force kernel, where a full thread
+block cooperates to scan references using a shared-memory top-k buffer.
+This removes the k ≤ 32 constraint and is the architecture that will
+scale to SIFT1M.
+
+---
+
 ## [Step 47] — Naive GPU distance kernel (2026-05-07)
 
 ### What

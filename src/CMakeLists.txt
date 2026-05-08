@@ -70,6 +70,7 @@ add_library(knng::bench ALIAS knng_bench)
 # real GPU kernels in knng::gpu link against this library transitively.
 add_library(knng_gpu_ref STATIC
     gpu/distance_cpu_ref.cpp
+    gpu/brute_force_cpu_ref.cpp   # Step 48: CPU reference brute-force KNN
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

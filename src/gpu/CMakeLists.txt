@@ -11,6 +11,7 @@ set(_knng_gpu_sources
     hello_cuda.cu
     distance_kernel.cu      # Step 47: naive pairwise L2² kernel
     brute_force_thread.cu   # Step 48: thread-per-query KNN kernel
+    brute_force_block.cu    # Steps 49 & 50: block-per-query KNN + end-to-end
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

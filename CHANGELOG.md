@@ -12,6 +12,98 @@ independent of the code diff.
 
 ---
 
+## [Step 50] — GPU brute-force end-to-end wrapper (2026-05-07)
+
+### What
+- Added `gpu_brute_force_knn` in `src/gpu/brute_force_block.cu`: selects
+  the block-per-query kernel for all k, matching the `knng::cpu::brute_force_knn`
+  host API.  A `Dataset` goes in, a `Knng` comes out — the GPU is entirely
+  transparent to the caller.
+- Added `GpuBruteForceEndToEnd` tests in `tests/gpu_brute_force_block_test.cpp`:
+  CPU-reference structural correctness test (always runs) and a GPU-vs-CPU
+  comparison test guarded by `#ifdef KNNG_HAVE_CUDA`.
+- Total tests: 218 (all passing).
+
+### Why
+The Phase 7 goal is "a working (but deliberately slow) GPU brute-force."
+`gpu_brute_force_knn` is that working baseline.  The one-call API means
+Phase 8 optimisations can be benchmarked by swapping the function pointer
+without changing any surrounding code — and the recall test at Step 51
+can compare the GPU output against the CPU ground truth without knowing
+which kernel runs underneath.
+
+### Tradeoff
+- **`brute_force_block_knn` for all k.** The thread-per-query kernel is
+  faster for k ≤ 16 (fewer global writes, no shared-memory overhead), but
+  having two code paths in the auto-selector adds fragility.  Deferred to
+  Phase 8 Step 53 where the warp-level top-k lands and the crossover point
+  can be measured empirically.
+
+### Learning
+The abstraction chain is now: `Dataset` → `DeviceBuffer` → GPU kernel →
+`Knng`, all hidden behind a one-liner that mirrors the CPU API.  Future
+GPU algorithms follow the same pattern: build on `DeviceBuffer`, expose
+a `Dataset`→`Knng` function, write a `GpuVsCpu` test.
+
+### Next
+Step 51 captures a Nsight Compute profile of the `brute_force_block`
+kernel (on a GPU machine) and documents the occupancy, L1 hit rate,
+coalescing efficiency, and roofline position in `docs/PERF_STEP50.md`.
+On Mac, the doc is written as a template with placeholder sections.
+
+---
+
+## [Step 49] — Block-per-query GPU brute-force KNN (2026-05-07)
+
+### What
+- Added `src/gpu/brute_force_block.cu`:
+  - `brute_force_block_kernel` — one CUDA thread block per query.
+    Threads cooperate via strided reference scan; each thread computes
+    its strided distances and inserts candidates into a shared-memory
+    top-k buffer protected by a single `atomicCAS` spinlock per block.
+    After the scan, thread 0 selection-sorts the shared list and writes
+    the result to global memory.
+  - `brute_force_block_knn` — host launcher: allocates `DeviceBuffer`s,
+    computes dynamic shared memory size
+    `k*(sizeof(float)+sizeof(index_t)) + sizeof(float) + sizeof(int)`,
+    launches the kernel, copies results back.
+- Added `tests/gpu_brute_force_block_test.cpp`: 4 CPU-reference tests
+  (k=n-1, 3-D clusters, correct-distances, step-50 end-to-end smoke)
+  plus 3 GPU-vs-CPU tests guarded by `#ifdef KNNG_HAVE_CUDA`.
+- Updated `src/gpu/CMakeLists.txt` to add `brute_force_block.cu`.
+- Updated `tests/CMakeLists.txt` to build `test_gpu_brute_force_block`.
+
+### Why
+The thread-per-query kernel (Step 48) hits a hard k ≤ 32 wall.  Real
+KNNG workloads commonly use k = 10–100.  The block-per-query design
+removes that constraint: the shared-memory top-k buffer can hold
+`k = (shared_mem_size – overhead) / (8 bytes)` entries per block.  On
+Volta (96 KiB shared memory per SM) that is k ≤ ~6000 — far beyond any
+practical KNN request.
+
+### Tradeoff
+- **`atomicCAS` spinlock.** Correct and simple, but serialises insertions.
+  For threads whose distance beats `sh_worst`, the contention is
+  proportional to how often a new winner arrives — which decreases as the
+  top-k list fills up.  In practice (k=10, n=10k) the lock is uncontested
+  for ~99.9% of the scan.  Phase 8 replaces this with a warp-level
+  reduction (Step 53).
+- **Selection sort at the end (thread 0 only).** `O(k²)` but k is small;
+  the sort cost is negligible compared to the `O(n·d)` distance scan.
+
+### Learning
+- `extern __shared__ char sh_raw[]` with manual pointer arithmetic is
+  the standard pattern for multiple shared-memory arrays of different
+  types: declare one `char[]` and cast sub-regions.  Each sub-region's
+  alignment must be manually respected (here all three regions are
+  naturally aligned because `float`, `index_t`, and `int` are 4-byte
+  aligned and the sub-region sizes are multiples of 4).
+- The `__syncthreads()` after shared-memory initialisation is mandatory:
+  without it, threads reading `sh_worst` before the init thread writes
+  it exhibit a data race.
+
+---
+
 ## [Step 48] — Thread-per-query GPU brute-force KNN (2026-05-07)
 
 ### What

@@ -43,6 +43,12 @@ include(FindKnngBlas)
 include(FindKnngOpenMP)
 include(FindKnngMPI)
 
+# --------------------------------------------------------------------------- #
+# CUDA / GPU (Phase 7+)
+# --------------------------------------------------------------------------- #
+option(KNNG_ENABLE_CUDA "Enable CUDA GPU acceleration (requires nvcc)" OFF)
+include(FindKnngCUDA)
+
 # Generate include/knng/version.hpp from the template.
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in"
@@ -73,6 +79,9 @@ add_library(knng::headers ALIAS knng_headers)
 add_subdirectory(src)
 if(KNNG_HAVE_MPI)
     add_subdirectory(src/dist)
+endif()
+if(KNNG_HAVE_CUDA)
+    add_subdirectory(src/gpu)
 endif()
 add_subdirectory(tools)
 add_subdirectory(docs)
@@ -121,5 +130,6 @@ message(STATUS "  binary dir    : ${CMAKE_BINARY_DIR}")
 message(STATUS "  blas (Step 21): ${KNNG_HAVE_BLAS}")
 message(STATUS "  openmp (S24+) : ${KNNG_HAVE_OPENMP}")
 message(STATUS "  mpi   (S38+)  : ${KNNG_HAVE_MPI}")
+message(STATUS "  cuda  (S44+)  : ${KNNG_HAVE_CUDA}")
 message(STATUS "------------------------------------")
 message(STATUS "")

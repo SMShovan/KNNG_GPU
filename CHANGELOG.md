@@ -12,6 +12,68 @@ independent of the code diff.
 
 ---
 
+## [Step 44] — CMake CUDA enablement (2026-05-07)
+
+### What
+- Added `cmake/FindKnngCUDA.cmake`: opt-in CUDA detection module. When
+  `-DKNNG_ENABLE_CUDA=ON` is passed to CMake, the module calls
+  `check_language(CUDA)` followed by `enable_language(CUDA)` and
+  `find_package(CUDAToolkit REQUIRED)`. On machines without nvcc, it
+  prints an informational message and sets `KNNG_HAVE_CUDA=OFF` without
+  raising an error. Exports `knng::cuda_iface` (INTERFACE target with
+  CUDA includes + `KNNG_HAVE_CUDA=1` compile definition) on success.
+- Added `src/gpu/CMakeLists.txt`: defines `knng::gpu` STATIC library
+  accumulating all GPU translation units. Links `knng::core`,
+  `knng::cuda_iface`, and `CUDA::cudart`. Sets
+  `CUDA_SEPARABLE_COMPILATION ON` and `CUDA_ARCHITECTURES 70;80;90`
+  (Volta, Ampere, Hopper — overridable via `-DCMAKE_CUDA_ARCHITECTURES`).
+- Added `src/gpu/hello_cuda.cu`: `knng::gpu::hello_kernel` prints
+  block/thread IDs from each GPU thread; `launch_hello()` is the host
+  launcher. Proves the CUDA compilation pipeline end-to-end.
+- Updated root `CMakeLists.txt`: added `option(KNNG_ENABLE_CUDA ...)`,
+  includes `FindKnngCUDA`, conditionally adds `src/gpu` subdirectory,
+  and shows `cuda (S44+)` in the build summary.
+
+### Why
+GPU code needs its own language (`CUDA`) in the CMake project definition,
+its own compiler flags, and its own architecture targets — all of which
+differ from the C++ host. Isolating this in a module (`FindKnngCUDA`)
+keeps the root `CMakeLists.txt` readable and gives later phases a single
+place to extend CUDA settings (e.g., adding `CUDA::cublas` in Phase 8).
+Defaulting to `OFF` means existing CI and Mac-dev builds are unaffected;
+GPU infrastructure is a deliberate opt-in.
+
+### Tradeoff
+- **`check_language(CUDA)` vs direct `find_package(CUDAToolkit)`.** The
+  `check_language` probe tests that the CUDA *compiler* (`nvcc` or
+  `clang++ --cuda`) is present before enabling the language, which gives
+  a clean error instead of a cryptic `enable_language` failure. The
+  downside is a second CMake configure-step pass if the compiler is found.
+- **`CUDA_ARCHITECTURES 70;80;90` hard-coded.** Volta is the minimum
+  because it introduced independent thread scheduling. 90 (Hopper) is
+  included speculatively for the target MI350A migration path. The list
+  is overridable; cluster admins can restrict to a single SM to halve
+  compile time.
+
+### Learning
+- CMake 3.18+ `enable_language(CUDA)` uses the `CMAKE_CUDA_COMPILER`
+  variable and respects `CUDA_ARCHITECTURES` on targets; the older
+  `FindCUDA` module (deprecated since 3.10) is not needed.
+- `check_language(CUDA)` populates `CMAKE_CUDA_COMPILER` without
+  actually enabling the language, making it safe to probe in a module
+  that the user might not opt into.
+- `CUDA::cudart` (from `CUDAToolkit`) is an imported target with the
+  right include paths and link flags; prefer it over raw
+  `-lcudart` / `${CUDA_LIBRARIES}`.
+
+### Next
+Step 45 adds `include/knng/gpu/backend.hpp` — the macro layer that maps
+`GPU_CHECK`, `GPU_MALLOC`, `GPU_MEMCPY`, `GPU_LAUNCH`, etc. to their
+CUDA / HIP / CPU-stub counterparts, fulfilling the HIP-portable-patterns
+invariant from day one of the GPU phase.
+
+---
+
 ## [Step 43] — NEO-DNND opt 2: intra-node SHM replication + DISTRIBUTED.md (2026-05-06)
 
 ### What

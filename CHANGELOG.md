@@ -12,6 +12,61 @@ independent of the code diff.
 
 ---
 
+## [Step 46] — `DeviceBuffer<T>` RAII (2026-05-07)
+
+### What
+- Added `include/knng/gpu/device_buffer.hpp`: move-only RAII wrapper for
+  a contiguous device-side (or stub heap-side) array of `T`.
+  API: `DeviceBuffer(n)`, `DeviceBuffer(vector<T>)`, `resize(n)`,
+  `copy_from_host(ptr, n)`, `copy_to_host(vector<T>&)`, `to_host()`,
+  `data()`, `size()`, `bytes()`, `empty()`.  Non-copyable; copy
+  constructor / copy assignment deleted.  `static_assert` rejects
+  non-trivially-copyable `T` at compile time.  All allocation uses
+  `GPU_MALLOC`/`GPU_FREE`/`GPU_MEMCPY_*` from `backend.hpp`.
+- Added `tests/device_buffer_test.cpp`: 13 tests covering default
+  construction, sized construction, zero-size-throws, vector
+  construction, move-construct, move-assign, self-move-assign safety,
+  resize (frees old allocation, zero-throws), copy round-trip (H2D then
+  D2H), copy-too-large-throws, copy_to_host, and trivial-aggregate
+  compilation.  All 13 pass on Mac (CPU stub).
+- Updated `tests/CMakeLists.txt` to build `test_device_buffer`.
+- Total tests: 203 (all passing).
+
+### Why
+Every GPU algorithm — brute-force KNN, NN-Descent local-join, top-k
+selection — needs to allocate, transfer, and release device memory.
+Without a RAII wrapper, every early-return or exception path must
+remember to call `cudaFree`, and every kernel launch precedes a
+six-line `cudaMalloc`/`cudaMemcpy` block.  `DeviceBuffer` collapses
+that pattern to one line and makes ownership transfer via `std::move`
+explicit at call sites.
+
+### Tradeoff
+- **`resize` does not preserve contents.** GPU-to-GPU memcpy during
+  resize would cost bandwidth; callers that need reallocation with
+  preservation (e.g., growing a neighbor list) copy to host first.
+  This keeps the API minimal and the implementation simple.
+- **No pinned-host allocation.** `cudaMallocHost` (page-locked memory)
+  improves H2D/D2H transfer speed.  That optimisation is deferred to
+  Phase 8 (Step 58 pipelining) where the transfer bandwidth is actually
+  the bottleneck.
+
+### Learning
+- `std::is_trivially_copyable_v<T>` catches the most common pitfall
+  (putting a `std::vector` into device memory) at compile time, not at
+  a mysterious CUDA runtime error or silent data corruption.
+- The CPU stub makes 13 new tests runnable on Mac — the GPU-path
+  correctness is structurally guaranteed to be identical because both
+  paths call the same `GPU_MEMCPY_*` macros.
+
+### Next
+Step 47 implements the first GPU kernel: a naive one-thread-per-(query,
+reference)-pair distance calculator `naive_distance_kernel`, its CPU
+reference equivalent, and a unit test that compares both outputs on an
+8-point dataset.
+
+---
+
 ## [Step 45] — GPU backend wrapper layer (HIP-portable) (2026-05-07)
 
 ### What

@@ -249,6 +249,23 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_device_buffer` — Step 46: DeviceBuffer<T> RAII wrapper.
+add_executable(test_device_buffer device_buffer_test.cpp)
+target_link_libraries(test_device_buffer
+    PRIVATE
+        knng::core
+        GTest::gtest_main
+)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_device_buffer PRIVATE knng::cuda_iface CUDA::cudart)
+endif()
+knng_set_warnings(test_device_buffer)
+set_target_properties(test_device_buffer PROPERTIES OUTPUT_NAME "test_device_buffer")
+gtest_discover_tests(test_device_buffer
+    PROPERTIES LABELS "gpu;device_buffer"
+    DISCOVERY_TIMEOUT 10
+)
+
 # `test_gpu_backend` — Step 45: GPU wrapper macro layer.
 # Exercises the CPU-stub path on machines without a GPU.
 add_executable(test_gpu_backend gpu_backend_test.cpp)

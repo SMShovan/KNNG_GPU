@@ -12,6 +12,61 @@ independent of the code diff.
 
 ---
 
+## [Step 51] — Nsight Compute profiling writeup (2026-05-07)
+
+### What
+- Added `docs/PERF_STEP50.md`: Phase-7 GPU performance baseline document.
+  Sections: capture instructions (`ncu` command line), roofline model
+  table, occupancy table, memory table (L1 hit rate, coalescing
+  efficiency), kernel-timeline breakdown, four optimisation opportunities
+  (deferred to Phase 8), and a comparison waterfall table with a row per
+  Phase-8 step.  All measurement cells are `[TODO: measure]` placeholders
+  pending a GPU-cluster run; the document describes the expected findings
+  based on the kernel's memory-access pattern.
+- Updated `.gitignore`: added `perf/` directory (Nsight Compute binary
+  reports — `*.ncu-rep`, `*.nsys-rep`, etc. — are not versioned; only
+  the markdown summary is committed).
+
+### Why
+Every GPU optimisation step in Phase 8 will be validated against a
+starting-point metric from Phase 7.  Recording *what to measure* and
+*why each metric matters* before the hardware is available forces clarity
+about what "improvement" means.  The document is a checklist, not a
+results table — it turns a future cluster session into a structured run
+rather than an ad-hoc exploration.
+
+The pattern established here — one `docs/PERF_StepNN.md` per GPU
+optimisation tier — is reused for Steps 55 (cuBLAS GEMM), 58 (pipelining),
+60 (single-GPU waterfall), and 70 (GPU NN-Descent Pareto).
+
+### Tradeoff
+- **Placeholder document vs waiting for measurements.** Committing a
+  template now means the document structure is peer-reviewed before
+  profiling, and future fills-in are incremental diffs rather than a
+  bulk add. The downside: `docs/PERF_STEP50.md` temporarily contains no
+  real numbers.
+
+### Learning
+- Coalescing inefficiency is the expected dominant cost in the naive
+  kernel: thread `t` and thread `t+1` load from addresses separated by
+  `d × 4 = 512` bytes (128-D SIFT) rather than 4 bytes.  Nsight Compute
+  reports this as `gld_efficiency` < 10%.  The fix (column-major
+  reference layout, Phase 8 Step 51) requires a one-time transpose at
+  dataset-load time.
+- The `atomicCAS` spinlock in `brute_force_block_kernel` is unlikely to
+  appear in the Nsight Compute stall analysis: the lock is contested only
+  by threads whose distance beats the current worst, which is rare
+  (~1/k of all threads in steady state).  If the profile shows high lock
+  stall, it implies the top-k is filling very slowly — a signal to
+  increase block size.
+
+### Next
+Phase 8 (Step 52) begins: memory coalescing by transposing the reference
+layout to column-major during kernel execution. The first real Nsight
+Compute numbers will land in that step's CHANGELOG entry.
+
+---
+
 ## [Step 50] — GPU brute-force end-to-end wrapper (2026-05-07)
 
 ### What

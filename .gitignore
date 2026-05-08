@@ -26,8 +26,9 @@ datasets/
 # Cached ground-truth files produced by the benchmark harness.
 *.gt
 
-# Benchmark output + profiling dumps.
+# Benchmark output + profiling dumps (Nsight Compute / Systems).
 benchmarks/results/
+perf/
 *.ncu-rep
 *.nsys-rep
 *.qdrep

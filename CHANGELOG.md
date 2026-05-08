@@ -12,6 +12,66 @@ independent of the code diff.
 
 ---
 
+## [Step 45] — GPU backend wrapper layer (HIP-portable) (2026-05-07)
+
+### What
+- Added `include/knng/gpu/backend.hpp`: HIP-portable macro layer with
+  three compilation paths — CUDA (`KNNG_HAVE_CUDA`), HIP
+  (`KNNG_HAVE_HIP`), and a CPU stub (neither defined).
+  Macros: `GPU_CHECK`, `GPU_MALLOC`, `GPU_FREE`, `GPU_MEMCPY_H2D`,
+  `GPU_MEMCPY_D2H`, `GPU_MEMCPY_D2D`, `GPU_SYNC`, `GPU_STREAM_CREATE`,
+  `GPU_STREAM_DESTROY`, `GPU_LAUNCH`, `GPU_DEVICE`, `GPU_GLOBAL`,
+  `GPU_HOST`, `GPU_HOST_DEVICE`, `GPU_SHARED`, `GPU_INLINE`.
+  Exports `knng::gpu::stream_t`, `knng::gpu::error_t`,
+  `knng::gpu::kSuccess` as type aliases resolved at compile time.
+  CPU stub delegates to `std::malloc`/`free`/`memcpy` so RAII
+  wrappers and algorithm tests compile and run without a GPU.
+- Added `tests/gpu_backend_test.cpp`: 8 tests covering
+  `GPU_MALLOC`/`GPU_FREE`, zero-byte allocation, H2D/D2H/D2D round-trip,
+  `GPU_SYNC`, stream lifecycle, `GPU_CHECK` error path, and
+  `GPU_HOST_DEVICE` qualifier compilability. All pass on Mac (CPU stub).
+- Updated `tests/CMakeLists.txt` to build `test_gpu_backend`.
+
+### Why
+Every GPU TU in the project must include exactly one header for GPU
+primitives; that header must be the *only* place where CUDA / HIP API
+names appear so that the Phase 8 hipify step is mechanical.  Writing
+`cudaMalloc` directly in `DeviceBuffer` or kernel files would scatter
+API names across 20+ files.  The macro layer also enables unit-testing
+of all host-side GPU wrapper code on Mac, which is where most of
+the development happens.
+
+### Tradeoff
+- **`GPU_SHARED` → `static` in CPU stub.** `__shared__` has no exact C++
+  equivalent (it's per-thread-block, not per-thread). Mapping to
+  `static` is the nearest analogue for file-scope kernel equivalents
+  and satisfies the compiler, but it changes the storage semantics.
+  The CPU stub path is for correctness testing of the *algorithm*,
+  not the memory-access pattern; shared-memory performance analysis
+  requires a real GPU.
+- **`GPU_LAUNCH` in CPU stub calls the function directly.** This means
+  that kernel-equivalent CPU functions must have the same signature as
+  their GPU counterparts (minus `__global__`). The convention is
+  enforced by the CPU-reference test pattern.
+
+### Learning
+- Separating `gpu_error_t` and `gpu_stream_t` into `namespace knng::gpu`
+  rather than top-level macros keeps the type system coherent and avoids
+  collisions with CUDA/HIP's own typedefs in TUs that include both
+  headers.
+- Wrapping every `cuda*` call in `GPU_CHECK` converts the C-style error
+  return into a C++ exception, which propagates cleanly through RAII
+  destructors and test harnesses without requiring manual `if (err != OK)`
+  chains everywhere.
+
+### Next
+Step 46 builds `include/knng/gpu/device_buffer.hpp` — the `DeviceBuffer<T>`
+RAII class that uses `GPU_MALLOC`/`GPU_FREE`/`GPU_MEMCPY_*` internally,
+owns device memory with move semantics, and serves as the building block
+for every GPU algorithm from here on.
+
+---
+
 ## [Step 44] — CMake CUDA enablement (2026-05-07)
 
 ### What

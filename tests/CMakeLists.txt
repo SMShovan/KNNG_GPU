@@ -249,6 +249,24 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_backend` — Step 45: GPU wrapper macro layer.
+# Exercises the CPU-stub path on machines without a GPU.
+add_executable(test_gpu_backend gpu_backend_test.cpp)
+target_link_libraries(test_gpu_backend
+    PRIVATE
+        knng::core
+        GTest::gtest_main
+)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_backend PRIVATE knng::cuda_iface CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_backend)
+set_target_properties(test_gpu_backend PROPERTIES OUTPUT_NAME "test_gpu_backend")
+gtest_discover_tests(test_gpu_backend
+    PROPERTIES LABELS "gpu;backend"
+    DISCOVERY_TIMEOUT 10
+)
+
 if(KNNG_HAVE_MPI)
     find_program(MPIRUN_EXEC
         NAMES mpirun mpiexec

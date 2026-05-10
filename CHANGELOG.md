@@ -12,6 +12,60 @@ independent of the code diff.
 
 ---
 
+## [Step 53] — Shared-memory reference tiling (2026-05-10)
+
+### What
+- Added `include/knng/gpu/tiled_brute_force.hpp`: declares
+  `cpu_tiled_brute_force_knn` and `gpu_tiled_brute_force_knn`.
+  Exposes `kTileW = 32` as a named constant.
+- Added `src/gpu/tiled_brute_force_cpu_ref.cpp` → `knng::gpu_ref`:
+  tiled brute-force KNN that processes references in `kTileW`-wide tiles
+  in a double loop, exactly mirroring the GPU access pattern.
+- Added `src/gpu/tiled_brute_force.cu` (CUDA-only):
+  `tiled_brute_force_kernel` — one block per query; threads cooperatively
+  load a `kTile × d` tile of references into shared memory, then each
+  thread scans its query against the full tile.  Uses the same atomicCAS
+  spinlock top-k from Step 49.  Dynamic shared memory:
+  `kTile*d*4 + k*8 + 4 + 4` bytes.
+- Added `tests/gpu_tiled_brute_force_test.cpp`: 4 CPU tests (two-point,
+  cluster, large-n tiles, sorted output) plus one GPU-vs-CPU test guarded
+  by `#ifdef KNNG_HAVE_CUDA`. Total: 227 (all passing).
+
+### Why
+Each reference vector is used by every thread in the block.  Loading from
+global memory once per block (shared-memory tile) instead of once per
+thread reduces global traffic by `blockDim.x / kTile = 128 / 32 = 4×`.
+The expected Nsight Compute metric improvement: L1/L2 hit rate rises
+significantly; `gld_efficiency` (coalescing) improves further because the
+tile load is a narrow `kTile`-wide coalesced request rather than a
+scattered per-thread load.
+
+### Tradeoff
+- **`sh_tile` size grows linearly with `d`.** For 128-D SIFT and
+  kTile=32 the tile occupies 32×128×4=16 KiB of shared memory per block.
+  Volta has 96 KiB per SM; 6 blocks per SM maximum before shared memory
+  becomes the occupancy limiter.  For higher-d datasets (e.g., 960-D GIST)
+  the tile alone requires 120 KiB — exceeding the per-SM budget and
+  forcing tile shrinkage.  This cap is the motivation for the
+  register-tiling strategy in Step 54 which avoids the large tile.
+- **Query read from global memory each tile.** The `d`-float query is
+  reloaded for every tile because it lives in registers rather than shared
+  memory. For large `d` this is acceptable (registers are cheap).
+
+### Learning
+- The key synchronisation pattern is: `__syncthreads()` after tile load
+  (ensures all tile data is visible before any thread reads from it) and
+  `__syncthreads()` after the per-thread scan (ensures no thread starts
+  loading the next tile before its peers have finished reading the current
+  one).  Missing either barrier causes a data race.
+
+### Next
+Step 54 adds register tiling on the query side: each thread holds Q=4
+query vectors in registers and computes distances to all Q simultaneously
+for each reference, amortizing the reference-load cost.
+
+---
+
 ## [Step 52] — Memory coalescing: column-major reference layout (2026-05-10)
 
 ### What

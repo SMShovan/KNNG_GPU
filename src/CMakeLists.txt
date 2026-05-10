@@ -71,7 +71,8 @@ add_library(knng::bench ALIAS knng_bench)
 add_library(knng_gpu_ref STATIC
     gpu/distance_cpu_ref.cpp
     gpu/brute_force_cpu_ref.cpp           # Step 48
-    gpu/coalesced_distance_cpu_ref.cpp    # Step 52: column-major layout reference
+    gpu/coalesced_distance_cpu_ref.cpp    # Step 52
+    gpu/tiled_brute_force_cpu_ref.cpp    # Step 53: shared-memory tiling reference
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

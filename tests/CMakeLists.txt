@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_wmma` — Step 58: Tensor Core WMMA distance.
+add_executable(test_gpu_wmma gpu_wmma_test.cpp)
+target_link_libraries(test_gpu_wmma
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_wmma PRIVATE knng::gpu CUDA::cudart CUDA::cublas)
+endif()
+knng_set_warnings(test_gpu_wmma)
+set_target_properties(test_gpu_wmma PROPERTIES OUTPUT_NAME "test_gpu_wmma")
+gtest_discover_tests(test_gpu_wmma
+    PROPERTIES LABELS "gpu;wmma" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_fp16` — Step 57: fp16 storage distance.
 add_executable(test_gpu_fp16 gpu_fp16_test.cpp)
 target_link_libraries(test_gpu_fp16

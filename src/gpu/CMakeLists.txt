@@ -18,6 +18,7 @@ set(_knng_gpu_sources
     register_tiled_bf.cu    # Step 55: query-side register tiling
     distance_gemm.cu        # Step 56: cuBLAS GEMM distance
     fp16_distance.cu        # Step 57: fp16 storage, fp32 compute
+    wmma_distance.cu        # Step 58: Tensor Core (WMMA) GEMM (CC≥70)
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

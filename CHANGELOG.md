@@ -12,6 +12,60 @@ independent of the code diff.
 
 ---
 
+## [Step 58] — Tensor Core (WMMA) distance GEMM (2026-05-10)
+
+### What
+- Added `include/knng/gpu/wmma_distance.hpp`: declares `cpu_wmma_distance`
+  (delegates to `cpu_distance_gemm`) and `gpu_wmma_distance` (CUDA-only,
+  requires nr and d multiples of 16).
+- Added `src/gpu/wmma_distance_cpu_ref.cpp` → `knng::gpu_ref`: one-liner
+  delegating to `cpu_distance_gemm` — the CPU has no Tensor Core hardware.
+- Added `src/gpu/wmma_distance.cu` (CUDA-only):
+  `wmma_gemm_kernel` — each warp handles one 16×16 output tile.  Inner
+  loop over k-tiles: `wmma::load_matrix_sync` (Q fp16 row-major, R fp16
+  col-major), `wmma::mma_sync`, scaled by −2 before `wmma::store_matrix_sync`.
+  Guarded by `#if __CUDA_ARCH__ >= 700`.  `gpu_wmma_distance` launcher:
+  converts fp32 → fp16, runs `wmma_gemm_kernel`, adds norms via
+  `norm_epilogue_kernel` from Step 56.
+- Added `tests/gpu_wmma_test.cpp`: 3 CPU tests + 1 GPU test.
+  Total: 250 (all passing).
+
+### Why
+Tensor Cores multiply 16×16 fp16 matrices in a single warp instruction
+(`wmma::mma_sync`), accumulating in fp32.  On Volta (V100): 125 TFLOP/s
+vs. 14 TFLOP/s CUDA FP32 = 9× theoretical peak.  For KNNG, the
+`O(nq × nr × d)` GEMM is the dominant cost at large n; getting even 50%
+of Tensor Core peak translates to ~4× wall-clock speedup over the naive
+FP32 CUDA core path.
+
+### Tradeoff
+- **nr and d must be multiples of 16.** The WMMA 16×16×16 tile has no
+  built-in partial-tile handling.  For non-aligned sizes, the caller
+  should zero-pad the dataset before calling `gpu_wmma_distance`.  Step
+  59 (streams) will add a padding helper.  cuBLAS Step 56 does not have
+  this restriction and remains the default for non-aligned inputs.
+- **`#if __CUDA_ARCH__ >= 700`.** On CC < 70, the WMMA API is absent;
+  the kernel body is ifdef-guarded to a no-op.  Any call to
+  `gpu_wmma_distance` on CC < 70 will produce silently wrong results
+  (the accumulator is never filled).  A runtime CC check via
+  `cudaDeviceGetAttribute` is deferred to Phase 9's `GpuContext` class.
+
+### Learning
+- `wmma::matrix_b` with `wmma::col_major` is the correct fragment for
+  computing `A × Bᵀ` when B is stored row-major: loading B as
+  col-major is equivalent to loading Bᵀ as row-major, which is the R^T
+  term in the distance formula.
+- `wmma::fill_fragment(acc, 0.f)` must precede the k-tile loop.
+  Without it, the accumulator holds uninitialized values and `mma_sync`
+  accumulates onto garbage.
+
+### Next
+Step 59 adds stream-based pipelining: H2D transfer, GPU compute, and D2H
+writeback for three consecutive dataset chunks are overlapped using three
+CUDA streams, enabling processing of datasets larger than GPU memory.
+
+---
+
 ## [Step 57] — Mixed precision: fp16 storage, fp32 compute (2026-05-10)
 
 ### What

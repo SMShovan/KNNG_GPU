@@ -19,6 +19,7 @@ set(_knng_gpu_sources
     distance_gemm.cu        # Step 56: cuBLAS GEMM distance
     fp16_distance.cu        # Step 57: fp16 storage, fp32 compute
     wmma_distance.cu        # Step 58: Tensor Core (WMMA) GEMM (CC≥70)
+    streamed_brute_force.cu # Step 59: stream-pipelined BF KNN
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

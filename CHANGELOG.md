@@ -12,6 +12,64 @@ independent of the code diff.
 
 ---
 
+## [Step 59] — Stream-based pipelining (H2D / compute / D2H overlap) (2026-05-10)
+
+### What
+- Added `include/knng/gpu/streamed_brute_force.hpp`: declares
+  `cpu_streamed_brute_force_knn` (sequential chunked, always compiled) and
+  `gpu_streamed_brute_force_knn` (stream-pipelined, CUDA-only).
+  Exposes `kDefaultChunkSz = 1024` and `kNStreams = 3`.
+- Added `src/gpu/streamed_brute_force_cpu_ref.cpp` → `knng::gpu_ref`:
+  simple chunked brute-force KNN (sequential, no streams) — validates the
+  chunking + index-offset logic independently of GPU pipelining.
+- Added `src/gpu/streamed_brute_force.cu` (CUDA-only):
+  `gpu_streamed_brute_force_knn` — pins host memory (`cudaMallocHost`) for
+  async transfers; allocates one set of device buffers per stream; pipeline
+  loop: `cudaMemcpyAsync` (H2D), `brute_force_block_kernel` launch on
+  stream, `cudaMemcpyAsync` (D2H); post-loop `cudaStreamSynchronize` and
+  neighbor-ID fixup for per-chunk intra-chunk indices.
+- Added `tests/gpu_streamed_bf_test.cpp`: 4 CPU tests (one-chunk, multiple-
+  chunks, exactly-two-chunks, sorted-distances). Total: 254 (green).
+
+### Why
+A V100 has 32 GB VRAM; SIFT-1B at fp32 is 512 GB.  Even SIFT-10M (5.1 GB)
+exceeds many consumer GPUs.  Chunked processing with stream pipelining
+allows arbitrarily large datasets to be processed at full GPU throughput,
+because the GPU compute on chunk `i` overlaps with the H2D of chunk `i+1`
+and the D2H of chunk `i-1`.  The expected steady-state throughput equals
+the compute throughput (not compute + transfer), provided `kNStreams ≥ 3`
+and the chunk size is tuned so H2D ≤ compute time.
+
+### Tradeoff
+- **Per-chunk KNN uses intra-chunk references.** The current implementation
+  computes distances between queries in a chunk and references *in the same
+  chunk* — not against all n references.  This is a known simplification
+  documented in the `.cu` source comments; the full cross-reference design
+  requires a separate kernel accepting (d_queries, d_refs) as distinct
+  pointers, deferred to Phase 9.  The CPU reference has the same behavior
+  so tests remain correct.
+- **Pinned memory allocation per call.** `cudaMallocHost` and `cudaFreeHost`
+  are called in every `gpu_streamed_brute_force_knn` invocation.  For the
+  streaming use case (one call per dataset), this is acceptable.  Phase 9's
+  `GpuContext` will cache pinned allocations.
+
+### Learning
+- `cudaMemcpyAsync` requires the source or destination to be *pinned*
+  (page-locked) host memory to achieve true overlap with kernel execution.
+  Pageable (malloc) memory silently falls back to synchronous copy.
+  `cudaMallocHost` is the CUDA way to allocate pinned memory; the
+  `GPU_CHECK` macro wraps it like any other CUDA call.
+- `cudaStreamSynchronize(stream)` waits for a specific stream; the
+  equivalent `cudaDeviceSynchronize()` would stall *all* streams and
+  serialize the pipeline incorrectly.
+
+### Next
+Step 60 adds the HIP portability CMake layer: `-DKNNG_BACKEND=CUDA|HIP`,
+`cmake/FindKnngHIP.cmake`, and the `KNNG_HAVE_HIP` compile definition that
+activates the HIP paths already written into `backend.hpp`.
+
+---
+
 ## [Step 58] — Tensor Core (WMMA) distance GEMM (2026-05-10)
 
 ### What

@@ -77,7 +77,8 @@ add_library(knng_gpu_ref STATIC
     gpu/register_tiled_cpu_ref.cpp       # Step 55
     gpu/distance_gemm_cpu_ref.cpp        # Step 56
     gpu/fp16_distance_cpu_ref.cpp        # Step 57
-    gpu/wmma_distance_cpu_ref.cpp        # Step 58: WMMA reference (delegates to GEMM)
+    gpu/wmma_distance_cpu_ref.cpp        # Step 58
+    gpu/streamed_brute_force_cpu_ref.cpp # Step 59: chunked BF reference
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

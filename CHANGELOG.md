@@ -12,6 +12,66 @@ independent of the code diff.
 
 ---
 
+## [Step 56] — cuBLAS GEMM for distances (2026-05-10)
+
+### What
+- Added `include/knng/gpu/distance_gemm.hpp`: declares `cpu_compute_norms`,
+  `cpu_distance_gemm`, `compute_norms_kernel`, `norm_epilogue_kernel`, and
+  `gpu_distance_gemm`.
+- Added `src/gpu/distance_gemm_cpu_ref.cpp` → `knng::gpu_ref`:
+  `cpu_compute_norms` (triple loop); `cpu_distance_gemm` — fills `out` with
+  norm sums, then calls `cblas_sgemm` (when `KNNG_HAVE_BLAS`) or a manual
+  triple loop to add `-2 Q Rᵀ`.
+- Added `src/gpu/distance_gemm.cu` (CUDA-only):
+  `compute_norms_kernel` (one thread per point, norm reduction over `d`
+  floats); `norm_epilogue_kernel` (one thread per output element, adds
+  `q_norms[qi] + r_norms[ri]`); `gpu_distance_gemm` — creates cuBLAS
+  handle, calls `cublasSgemm(-2 Q Rᵀ)` with column-major convention,
+  runs epilogue, destroys handle.
+- Updated `src/gpu/CMakeLists.txt` to add `distance_gemm.cu` and link
+  `CUDA::cublas`.
+- Added `tests/gpu_distance_gemm_test.cpp`: 5 CPU tests (norms,
+  matches-naive 2×3, self-distance, high-dim, symmetry) + 1 GPU test.
+  Total: 240 (all passing).
+
+### Why
+The GEMM path moves the `O(nq × nr × d)` dot-product computation from
+CUDA cores (scalar FMA pipeline) onto Tensor Cores (WMMA / `cublasGemmEx`
+with TF32 or fp16 accumulation on Ampere+) — a 4–16× throughput jump for
+large d.  Even without Tensor Cores, cuBLAS uses highly-tuned shared-memory
+GEMM algorithms that approach peak memory bandwidth.  For SIFT-128 at
+n=1M, q=10K: the naive kernel (Step 47) requires 1.28 TB of global loads;
+the GEMM path requires O(d×n + nq×nr) ≈ 3.8 GB — a 340× reduction in
+memory traffic.
+
+### Tradeoff
+- **cuBLAS handle creation per call.** Creating a `cublasHandle_t` in
+  `gpu_distance_gemm` adds ~10 ms of overhead on first call (CUDA context
+  warm-up).  Phase 9 will hoist the handle into a persistent `GpuContext`
+  object shared across all GPU calls.
+- **Column-major convention.** cuBLAS is natively column-major; to compute
+  `C = -2 Q Rᵀ` in row-major we pass `(B, A)` with `(OP_T, OP_N)`,
+  exploiting the identity `row-major(C) = col-major(Cᵀ) = -2 Rᵀᵀ Qᵀ =
+  -2 R Qᵀ`, which is what we want (nr×nq matrix Cᵀ, read as row-major nq×nr).
+
+### Learning
+- The algebraic decomposition `‖a-b‖² = ‖a‖² + ‖b‖² - 2⟨a,b⟩` separates
+  the expensive bilinear term (GEMM, O(nq×nr×d)) from cheap quadratic terms
+  (norm computation, O(nd)), enabling the use of hardware-optimised GEMM
+  without changing the distance semantics.
+- `cblas_sgemm` on Mac calls Accelerate's optimised SGEMM automatically —
+  the same code that goes to cuBLAS on CUDA, to hipBLAS on HIP, and to
+  OpenBLAS on generic Linux.  The `KNNG_HAVE_BLAS` guard provides a
+  fallback triple loop so the CPU reference is always exercisable.
+
+### Next
+Step 57 stores feature vectors in fp16 (half precision) to halve the
+memory bandwidth requirement.  On the GPU, fp16 loads are converted to
+fp32 before the GEMM accumulation, so recall is unaffected by the
+reduced storage precision.
+
+---
+
 ## [Step 55] — Register tiling: Q queries per thread (2026-05-10)
 
 ### What

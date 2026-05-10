@@ -74,7 +74,8 @@ add_library(knng_gpu_ref STATIC
     gpu/coalesced_distance_cpu_ref.cpp    # Step 52
     gpu/tiled_brute_force_cpu_ref.cpp    # Step 53
     gpu/warp_top_k_cpu_ref.cpp           # Step 54
-    gpu/register_tiled_cpu_ref.cpp       # Step 55: register tiling reference
+    gpu/register_tiled_cpu_ref.cpp       # Step 55
+    gpu/distance_gemm_cpu_ref.cpp        # Step 56: GEMM decomposition reference
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

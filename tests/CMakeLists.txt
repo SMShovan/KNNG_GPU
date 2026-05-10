@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_distance_gemm` — Step 56: GEMM-based distance.
+add_executable(test_gpu_distance_gemm gpu_distance_gemm_test.cpp)
+target_link_libraries(test_gpu_distance_gemm
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_distance_gemm PRIVATE knng::gpu CUDA::cudart CUDA::cublas)
+endif()
+knng_set_warnings(test_gpu_distance_gemm)
+set_target_properties(test_gpu_distance_gemm PROPERTIES OUTPUT_NAME "test_gpu_distance_gemm")
+gtest_discover_tests(test_gpu_distance_gemm
+    PROPERTIES LABELS "gpu;gemm" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_register_tiled` — Step 55: register tiling.
 add_executable(test_gpu_register_tiled gpu_register_tiled_test.cpp)
 target_link_libraries(test_gpu_register_tiled

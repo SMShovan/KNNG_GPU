@@ -16,6 +16,7 @@ set(_knng_gpu_sources
     tiled_brute_force.cu    # Step 53: shared-memory reference tiling
     warp_brute_force.cu     # Step 54: warp-shuffle top-k
     register_tiled_bf.cu    # Step 55: query-side register tiling
+    distance_gemm.cu        # Step 56: cuBLAS GEMM distance
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})
@@ -26,6 +27,7 @@ target_link_libraries(knng_gpu
         knng::gpu_ref       # CPU reference implementations (always compiled)
         knng::cuda_iface
         CUDA::cudart
+        CUDA::cublas        # Step 56: cuBLAS GEMM distance
 )
 
 set_target_properties(knng_gpu PROPERTIES

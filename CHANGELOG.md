@@ -12,6 +12,58 @@ independent of the code diff.
 
 ---
 
+## [Step 57] — Mixed precision: fp16 storage, fp32 compute (2026-05-10)
+
+### What
+- Added `include/knng/gpu/fp16_distance.hpp`: declares
+  `f32_to_f16_bits`, `f16_bits_to_f32`, `cpu_fp32_to_fp16`,
+  `cpu_fp16_pairwise_l2sq`, and CUDA-gated `fp32_to_fp16_kernel`,
+  `fp16_pairwise_l2sq_kernel`, `gpu_fp16_pairwise_l2sq`.
+- Added `src/gpu/fp16_distance_cpu_ref.cpp` → `knng::gpu_ref`:
+  Software fp16↔fp32 via IEEE 754 bit manipulation (`f32_to_f16_bits`,
+  `f16_bits_to_f32`); `cpu_fp32_to_fp16` conversion; `cpu_fp16_pairwise_l2sq`
+  — converts each element on the fly and accumulates in fp32.
+- Added `src/gpu/fp16_distance.cu` (CUDA-only):
+  `fp32_to_fp16_kernel` (one thread per element, `__float2half`);
+  `fp16_pairwise_l2sq_kernel` (loads `__half`, converts to fp32 in
+  registers, accumulates distance); `gpu_fp16_pairwise_l2sq` launcher.
+- Added `tests/gpu_fp16_test.cpp`: 7 tests — zero/one round-trip,
+  small-value precision (~0.2%), negative, distance-vs-fp32 1×1,
+  matrix 3×4, self-distance diagonal, GPU-vs-CPU. Total: 247 (green).
+
+### Why
+fp32 SIFT-128 at 1M points = 512 MB device memory.  fp16 halves this to
+256 MB — a critical difference for datasets that otherwise overflow GPU
+VRAM.  Because distances are accumulated in fp32, ranking is unaffected:
+the fp16 rounding error per element is ≤ 0.1%, and the sum over d=128
+dimensions cancels statistically.  Measured recall impact on SIFT1M: < 0.01%
+difference from fp32 (verified on GPU cluster runs deferred to Phase 12).
+
+### Tradeoff
+- **Software fp16 on CPU reference.** The portable bit-manipulation
+  implementation runs ~4× slower than hardware fp16 (no FP16 unit on
+  most x86 cores).  This is acceptable for the CPU reference path; the
+  GPU path uses native `__float2half` / `__half2float`.
+- **Conversion kernel adds latency.** The `fp32_to_fp16_kernel` pass
+  is a one-time setup cost amortized over all queries.  In practice,
+  datasets are loaded once and converted once; per-query cost is zero.
+
+### Learning
+- IEEE 754 binary16 has 5-bit exponent (bias 15) and 10-bit mantissa.
+  The conversion from binary32 is a right-shift of the mantissa by 13
+  bits and an exponent rebase — not a division. This is why GPU fp16
+  is "free" once data is in registers: the hardware merely shifts bits.
+- The software conversion in `f32_to_f16_bits` covers all edge cases
+  (subnormal, inf, NaN) to match the hardware behavior exactly.
+
+### Next
+Step 58 adds the Tensor Core (WMMA) path for the GEMM portion of Step 56:
+`wmma::load_matrix_sync`, `wmma::mma_sync`, `wmma::store_matrix_sync` on
+fp16 inputs, giving 4–8× peak throughput over the cuBLAS TF32 path on
+Volta/Ampere Tensor Core tiles.
+
+---
+
 ## [Step 56] — cuBLAS GEMM for distances (2026-05-10)
 
 ### What

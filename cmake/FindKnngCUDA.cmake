@@ -13,7 +13,8 @@
 
 set(KNNG_HAVE_CUDA OFF CACHE BOOL "CUDA Toolkit found and GPU build enabled" FORCE)
 
-if(NOT KNNG_ENABLE_CUDA)
+# Accept both -DKNNG_BACKEND=CUDA and legacy -DKNNG_ENABLE_CUDA=ON.
+if(NOT KNNG_ENABLE_CUDA AND NOT KNNG_BACKEND STREQUAL "CUDA")
     return()
 endif()
 

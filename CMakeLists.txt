@@ -44,10 +44,26 @@ include(FindKnngOpenMP)
 include(FindKnngMPI)
 
 # --------------------------------------------------------------------------- #
-# CUDA / GPU (Phase 7+)
+# GPU backend (Phase 7+)
 # --------------------------------------------------------------------------- #
+# Select the GPU backend:
+#   -DKNNG_BACKEND=CUDA   (default)  — NVIDIA CUDA via nvcc / clang-cuda
+#   -DKNNG_BACKEND=HIP               — AMD HIP / ROCm
+#   -DKNNG_BACKEND=NONE              — CPU-only, no GPU
+#
+# Legacy single-variable opt-in is still supported:
+#   -DKNNG_ENABLE_CUDA=ON  is equivalent to -DKNNG_BACKEND=CUDA
+set(KNNG_BACKEND "NONE" CACHE STRING "GPU backend: CUDA | HIP | NONE")
+set_property(CACHE KNNG_BACKEND PROPERTY STRINGS CUDA HIP NONE)
+
+# Legacy compatibility.
 option(KNNG_ENABLE_CUDA "Enable CUDA GPU acceleration (requires nvcc)" OFF)
+if(KNNG_ENABLE_CUDA AND KNNG_BACKEND STREQUAL "NONE")
+    set(KNNG_BACKEND "CUDA")
+endif()
+
 include(FindKnngCUDA)
+include(FindKnngHIP)
 
 # Generate include/knng/version.hpp from the template.
 configure_file(
@@ -80,7 +96,7 @@ add_subdirectory(src)
 if(KNNG_HAVE_MPI)
     add_subdirectory(src/dist)
 endif()
-if(KNNG_HAVE_CUDA)
+if(KNNG_HAVE_CUDA OR KNNG_HAVE_HIP)
     add_subdirectory(src/gpu)
 endif()
 add_subdirectory(tools)
@@ -130,6 +146,8 @@ message(STATUS "  binary dir    : ${CMAKE_BINARY_DIR}")
 message(STATUS "  blas (Step 21): ${KNNG_HAVE_BLAS}")
 message(STATUS "  openmp (S24+) : ${KNNG_HAVE_OPENMP}")
 message(STATUS "  mpi   (S38+)  : ${KNNG_HAVE_MPI}")
+message(STATUS "  gpu backend   : ${KNNG_BACKEND}")
 message(STATUS "  cuda  (S44+)  : ${KNNG_HAVE_CUDA}")
+message(STATUS "  hip   (S60+)  : ${KNNG_HAVE_HIP}")
 message(STATUS "------------------------------------")
 message(STATUS "")

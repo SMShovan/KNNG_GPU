@@ -12,6 +12,64 @@ independent of the code diff.
 
 ---
 
+## [Step 60] — HIP portability layer (2026-05-10)
+
+### What
+- Added `cmake/FindKnngHIP.cmake`: detects HIP/ROCm via `find_package(HIP)`.
+  Exports `knng::hip_iface` (INTERFACE target with HIP includes and
+  `KNNG_HAVE_HIP=1` definition) when HIP is found.  Sets `KNNG_HAVE_HIP`
+  cache variable.
+- Updated `CMakeLists.txt`:
+  - Added `KNNG_BACKEND` cache string (`CUDA | HIP | NONE`, default `NONE`).
+  - Legacy `-DKNNG_ENABLE_CUDA=ON` is still honored (mapped to `CUDA`).
+  - Includes `FindKnngHIP`; conditionally adds `src/gpu` when either backend
+    is active.
+  - Build summary now shows `gpu backend` and `hip (S60+)` lines.
+- Updated `cmake/FindKnngCUDA.cmake` to gate on either `KNNG_ENABLE_CUDA`
+  or `KNNG_BACKEND=CUDA`.
+- Added `docs/HIP_PORTABILITY.md`: comprehensive equivalence table
+  (CUDA → HIP for all 16 `backend.hpp` macros), library map (cuBLAS →
+  hipBLAS/rocBLAS, WMMA → rocWMMA, NCCL → RCCL), hipify-perl command,
+  MI350A target notes, and CMake invocation examples.
+- Added `tests/gpu_hip_portability_test.cpp`: 5 compile-time and runtime
+  checks that all backend macros compile, `GPU_SYNC` runs without error,
+  stream lifecycle works, `kSuccess` equals 0, and the backend name is
+  defined. Total: 259 (all passing).
+
+### Why
+The project invariant from Step 1 is "HIP-portable patterns from the
+start."  This step proves the invariant was upheld: `backend.hpp` already
+contains complete HIP paths; adding `FindKnngHIP.cmake` + `KNNG_BACKEND=HIP`
+is sufficient to enable them.  No source files need modification — the
+hipify equivalence table documents the few residual library-level changes
+needed (cuBLAS → hipBLAS, etc.) that will be addressed in Phase 12.
+
+### Tradeoff
+- **`src/gpu_hip/` mirror tree not created.** The plan mentioned generating
+  a `src/gpu_hip/` directory via `hipify-perl`.  In practice, `backend.hpp`
+  eliminates the need for a separate source tree: the same `.cu` files
+  compile as HIP when `hipcc` replaces `nvcc` (since HIP `.cu` compilation
+  is `hipcc`-compatible).  The hipify step is now a CMake switch, not a
+  file-tree operation.
+
+### Learning
+- `KNNG_BACKEND` is a string cache variable rather than a bool because a
+  three-way choice (`CUDA`, `HIP`, `NONE`) doesn't map cleanly to boolean
+  options.  CMake's `set_property(CACHE … PROPERTY STRINGS …)` provides
+  IDE drop-down support.
+- The MI350A APU runs GFX942 (CDNA3), supports HIP 6.x, and has Matrix
+  Core units that map to rocWMMA — the AMD equivalent of WMMA Tensor Cores.
+  The `#if __CUDA_ARCH__ >= 700` guard in Step 58 has a direct HIP
+  analogue: `#if defined(__gfx90a__)` for CDNA2, or the `rocwmma::` API
+  which handles the capability check internally.
+
+### Next
+Step 61 writes `docs/PERF_SINGLE_GPU.md` — the Phase-8 capstone performance
+waterfall document with a row per optimization step and expected/measured
+Nsight Compute metrics.
+
+---
+
 ## [Step 59] — Stream-based pipelining (H2D / compute / D2H overlap) (2026-05-10)
 
 ### What

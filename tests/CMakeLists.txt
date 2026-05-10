@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_coalesced` — Step 52: coalesced distance with column-major refs.
+add_executable(test_gpu_coalesced gpu_coalesced_test.cpp)
+target_link_libraries(test_gpu_coalesced
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_coalesced PRIVATE knng::gpu CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_coalesced)
+set_target_properties(test_gpu_coalesced PROPERTIES OUTPUT_NAME "test_gpu_coalesced")
+gtest_discover_tests(test_gpu_coalesced
+    PROPERTIES LABELS "gpu;coalesced" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_brute_force_block` — Steps 49 & 50: block-per-query KNN + end-to-end.
 add_executable(test_gpu_brute_force_block gpu_brute_force_block_test.cpp)
 target_link_libraries(test_gpu_brute_force_block

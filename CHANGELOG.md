@@ -12,6 +12,60 @@ independent of the code diff.
 
 ---
 
+## [Step 52] — Memory coalescing: column-major reference layout (2026-05-10)
+
+### What
+- Added `include/knng/gpu/coalesced_distance.hpp`: declares `cpu_transpose`,
+  `cpu_coalesced_pairwise_l2sq`, `transpose_kernel`, `coalesced_pairwise_l2sq_kernel`,
+  and `gpu_coalesced_pairwise_l2sq`.
+- Added `src/gpu/coalesced_distance_cpu_ref.cpp` → `knng::gpu_ref`:
+  `cpu_transpose` (naive O(rows×cols) loop) and `cpu_coalesced_pairwise_l2sq`
+  (distance loop reading `refs_T[k][ri]` = column-major).
+- Added `src/gpu/coalesced_distance.cu` (CUDA-only):
+  `transpose_kernel` — tiled 32×32 shared-memory transpose with +1 padding
+  to avoid bank conflicts; `coalesced_pairwise_l2sq_kernel` — one thread per
+  (qi, ri), reads column-major references so consecutive threads load
+  consecutive addresses; `gpu_coalesced_pairwise_l2sq` — transposes refs on
+  device, then runs the coalesced kernel.
+- Added `tests/gpu_coalesced_test.cpp`: 5 tests — transpose correctness,
+  transpose round-trip, matches-naive 2×3, matches-naive high-dim (4×8×32),
+  self-distance zero. All pass on CPU stub (223 total).
+
+### Why
+The naive Step-47 kernel loads `refs[ri][dim]` with stride `d × 4` bytes
+between consecutive warp threads — for SIFT-128 that is 512 bytes, giving
+≈1/128 coalescing efficiency.  Transposing the reference matrix to
+`refs_T[dim][ri]` makes consecutive threads (ri, ri+1, …) load adjacent
+4-byte words — 100 % coalescing efficiency.  Expected improvement on GPU:
+4–8× reduction in L2 traffic, proportional speedup in the memory-bound
+distance kernel.
+
+### Tradeoff
+- **One extra global-memory pass for the transpose.** For n=1M points,
+  128-D, the transpose moves 512 MB — about the same time as 4–8 naive
+  kernel passes.  Net gain is positive as long as the dataset is used for
+  more than ~4 queries, which is always true in KNNG construction.
+- **+1 pad in shared-memory tile.** `tile[32][33]` avoids the 32-way bank
+  conflict that would arise from `tile[32][32]` when reading columns (each
+  column element would map to the same bank). The +1 shifts consecutive
+  column reads to consecutive banks at the cost of 4 bytes × 32 per tile.
+
+### Learning
+- The transpose kernel uses the classic "tiled transpose" pattern: load a
+  `32×32` tile in coalesced row-major order, then write it in coalesced
+  column-major order via the transposed tile indices.  The +1 padding in
+  shared memory is the canonical bank-conflict fix for matrix transposition.
+- Passing `refs_T` instead of `refs` to the distance kernel requires no
+  algorithmic change — only the memory layout of one argument changes.
+
+### Next
+Step 53 adds shared-memory reference tiling to the block-per-query kernel:
+a warp-sized tile of the reference matrix is loaded into shared memory once
+and reused by all threads in the block, reducing global load volume by a
+factor of `blockDim.x / TILE_W`.
+
+---
+
 ## [Step 51] — Nsight Compute profiling writeup (2026-05-07)
 
 ### What

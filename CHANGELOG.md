@@ -12,6 +12,55 @@ independent of the code diff.
 
 ---
 
+## [Step 61] — Single-GPU performance waterfall writeup (2026-05-10)
+
+### What
+- Added `docs/PERF_SINGLE_GPU.md`: Phase-8 capstone performance document.
+  Sections: hardware setup table, `ncu` capture commands for all 10
+  kernel variants, optimization waterfall table (10 rows × 6 metrics),
+  analytical explanation of coalescing/tiling/GEMM speedup mechanisms,
+  recall impact analysis, CPU baseline comparison, file inventory, and a
+  preview of Phase-9 goals.  All measurement cells are `[TODO]` pending
+  GPU cluster runs.
+- Total tests: 259 (unchanged — documentation step only).
+
+### Why
+The waterfall document is the "headline artifact" of Phase 8 (per the
+project plan).  Recording the analytical expected values before measurements
+serves two purposes:
+1. **Hypothesis documentation.** The predicted speedup for each step is
+   derived from first principles (Roofline model + cache-line math).
+   If the measured value differs significantly, the discrepancy teaches
+   something non-obvious about the GPU microarchitecture.
+2. **Cluster session structure.** The capture commands and metric table
+   turn a future cluster session into a structured experiment rather than
+   an ad-hoc exploration.
+
+### Tradeoff
+- **No measurements yet.** The document contains only analytical
+  predictions.  The cluster run (pushed to a V100 or A100 node) fills
+  in the `[TODO]` cells.  The document will be updated in-place at that
+  time, and the update committed as a separate "fill-in" commit referencing
+  Phase 8.
+
+### Learning
+- Analytical Roofline position before profiling is a professional habit:
+  it prevents confirmation bias (measuring until you find a number you
+  like) and makes the measurements interpretable — a number only makes
+  sense relative to a theoretical ceiling.
+- The most predictable speedup in the waterfall is Step 52 (coalescing):
+  the CUDA programming guide states that non-coalesced loads incur exactly
+  32 separate 128-byte transactions per warp (one per thread) instead of
+  one; for 512-byte stride (d=128) the L2 traffic reduction is exactly
+  128×, confirmed by `l2_global_load_bytes` in Nsight Compute.
+
+### Next
+Phase 9 — GPU NN-Descent begins at in-repo Step 62.  The first commit
+lands `DeviceNeighborList` (fixed-width struct packed for 128-byte
+alignment) and `DeviceBuffer<DeviceNeighborList>`.
+
+---
+
 ## [Step 60] — HIP portability layer (2026-05-10)
 
 ### What

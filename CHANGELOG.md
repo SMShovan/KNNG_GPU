@@ -12,6 +12,59 @@ independent of the code diff.
 
 ---
 
+## [Step 55] — Register tiling: Q queries per thread (2026-05-10)
+
+### What
+- Added `include/knng/gpu/register_tiled_bf.hpp`: declares
+  `cpu_register_tiled_knn` and `gpu_register_tiled_knn`; exports
+  `kRegTileQ = 2` (queries per thread).
+- Added `src/gpu/register_tiled_cpu_ref.cpp` → `knng::gpu_ref`:
+  processes queries in groups of `kRegTileQ`; for each reference, computes
+  distances to all queries in the group before advancing.
+- Added `src/gpu/register_tiled_bf.cu` (CUDA-only):
+  `register_tiled_kernel` — each thread owns 2 queries (`qi0`, `qi1`);
+  for each reference, both distances are computed before the reference
+  registers are reused; two independent insertion-sort top-k lists.
+  `gpu_register_tiled_knn` launcher: 64 threads/block × 2 queries =
+  128 queries per block.
+- Added `tests/gpu_register_tiled_test.cpp`: 4 CPU tests (two-point,
+  odd-n boundary, clusters, large-n) + 1 GPU test. Total: 235 (green).
+
+### Why
+Reference loading is the bottleneck in Steps 48-54: each reference's `d`
+floats are loaded from L2/HBM once per query.  By processing Q=2 queries
+simultaneously per thread, the reference data loaded for one loop iteration
+is used 2× rather than 1×, halving the per-computation bandwidth
+requirement.  On a bandwidth-limited kernel (all Steps 48-54 are), halving
+the bandwidth requirement should roughly double throughput.
+
+### Tradeoff
+- **k ≤ 32 per query.** Each query has a register-resident top-k of size k.
+  Two queries consume 2k × (4+4) = 16k bytes of register space per thread.
+  At k=10 that is 160 bytes → 40 registers; at k=32 → 128 registers.  The
+  255-register limit per thread on Volta is the hard ceiling.
+- **Q=2 is conservative.** For small d (≤ 32-D), Q=4 or Q=8 are feasible
+  and produce proportionally higher arithmetic intensity.  The `kRegTileQ`
+  constant is exposed as a tunable so Phase 9 can sweep Q against occupancy
+  and choose the Pareto-optimal value per dataset.
+
+### Learning
+- When two independent computation streams share a single data load,
+  the GPU's instruction-level parallelism (ILP) keeps both FP pipelines
+  busy.  This is the GPU analogue of "software pipelining" — no extra
+  memory or synchronisation is needed, just restructuring the computation.
+- The odd-n boundary case (`n % kRegTileQ != 0`) is handled by checking
+  `qi1 < n` before computing the second query's distance.  The `q1 == nullptr`
+  check in the GPU kernel prevents out-of-bounds reads.
+
+### Next
+Step 56 replaces the inner distance loop with a cuBLAS `cublasSgemm` call
+computing `-2 Q Rᵀ`, then adds the precomputed L2 norms via a fused
+epilogue kernel.  This is the distance-as-GEMM strategy previewed in the
+CPU Phase 3 BLAS step.
+
+---
+
 ## [Step 54] — Warp-level top-k with shuffle reduction (2026-05-10)
 
 ### What

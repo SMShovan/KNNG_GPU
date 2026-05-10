@@ -15,6 +15,7 @@ set(_knng_gpu_sources
     coalesced_distance.cu   # Step 52: column-major reference layout
     tiled_brute_force.cu    # Step 53: shared-memory reference tiling
     warp_brute_force.cu     # Step 54: warp-shuffle top-k
+    register_tiled_bf.cu    # Step 55: query-side register tiling
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

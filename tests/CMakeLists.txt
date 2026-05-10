@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_register_tiled` — Step 55: register tiling.
+add_executable(test_gpu_register_tiled gpu_register_tiled_test.cpp)
+target_link_libraries(test_gpu_register_tiled
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_register_tiled PRIVATE knng::gpu CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_register_tiled)
+set_target_properties(test_gpu_register_tiled PROPERTIES OUTPUT_NAME "test_gpu_register_tiled")
+gtest_discover_tests(test_gpu_register_tiled
+    PROPERTIES LABELS "gpu;register_tiled" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_warp_top_k` — Step 54: warp-level top-k.
 add_executable(test_gpu_warp_top_k gpu_warp_top_k_test.cpp)
 target_link_libraries(test_gpu_warp_top_k

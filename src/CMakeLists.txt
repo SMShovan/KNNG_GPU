@@ -72,7 +72,8 @@ add_library(knng_gpu_ref STATIC
     gpu/distance_cpu_ref.cpp
     gpu/brute_force_cpu_ref.cpp           # Step 48
     gpu/coalesced_distance_cpu_ref.cpp    # Step 52
-    gpu/tiled_brute_force_cpu_ref.cpp    # Step 53: shared-memory tiling reference
+    gpu/tiled_brute_force_cpu_ref.cpp    # Step 53
+    gpu/warp_top_k_cpu_ref.cpp           # Step 54: warp-level top-k reference
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

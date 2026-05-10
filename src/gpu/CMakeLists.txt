@@ -14,6 +14,7 @@ set(_knng_gpu_sources
     brute_force_block.cu    # Steps 49 & 50: block-per-query KNN + end-to-end
     coalesced_distance.cu   # Step 52: column-major reference layout
     tiled_brute_force.cu    # Step 53: shared-memory reference tiling
+    warp_brute_force.cu     # Step 54: warp-shuffle top-k
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

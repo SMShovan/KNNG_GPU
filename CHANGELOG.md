@@ -12,6 +12,62 @@ independent of the code diff.
 
 ---
 
+## [Step 54] — Warp-level top-k with shuffle reduction (2026-05-10)
+
+### What
+- Added `include/knng/gpu/warp_top_k.hpp`: declares `cpu_warp_top_k_knn`
+  (CPU reference, always compiled) and `gpu_warp_top_k_knn` (GPU launcher).
+- Added `src/gpu/warp_top_k_cpu_ref.cpp` → `knng::gpu_ref`:
+  Simulates the 32-lane partial-top-k + merge strategy in plain C++.
+  Each lane processes every 32nd reference; lanes are merged via a
+  temporary `TopK` after all lanes finish.
+- Added `src/gpu/warp_brute_force.cu` (CUDA-only):
+  `warp_brute_force_kernel` — one warp (32 threads) per query; each lane
+  scans every 32nd reference using insertion-sort partial top-k in
+  registers; shuffle-merge (`__shfl_sync`) collects all lane results
+  into lane 0, which writes the sorted top-k to global memory.
+  `gpu_warp_top_k_knn` launcher: 4 warps per block (128 threads).
+- Added `tests/gpu_warp_top_k_test.cpp`: 4 CPU tests + 1 GPU-vs-CPU
+  test. Total: 231 (all passing).
+
+### Why
+The atomicCAS spinlock in Steps 49/53 serialises all candidate insertions
+through a single global bottleneck.  For small k (≤ 10), each insertion
+must compare against every element of the top-k list, and competing
+threads must wait for the lock to be released.  The warp-shuffle approach
+eliminates the lock entirely: each lane operates on a disjoint slice of
+the reference set (no writes are shared during the scan), and the merge
+uses `__shfl_sync` which is implemented as a hardware warp-broadcast — no
+memory round-trip, no cache invalidation.  Expected improvement: 2–4× in
+the top-k phase for small k.
+
+### Tradeoff
+- **k ≤ 32 register budget.** Each lane holds 2k float registers for the
+  partial top-k.  At k=32 that is 64 registers per thread; at 4 warps per
+  block (128 threads per block) total register usage is 8 192, well within
+  the 65 536-register-per-SM limit on Volta.  Above k=32 register spill
+  begins — the block-per-query design (Step 49) handles large k better.
+- **Shuffle-merge is O(k × kWarp).** Collecting results from 32 lanes
+  requires 32 rounds of k shuffles = 32k warp instructions.  For k=10
+  that is 320 instructions — cheap relative to the O(n/32 × d) scan.
+
+### Learning
+- `__shfl_sync(mask, var, src_lane)` broadcasts the value of `var` from
+  `src_lane` to all lanes specified by `mask` in one warp instruction.
+  No shared memory, no synchronisation barrier — it is the cheapest
+  possible inter-thread communication on CUDA.
+- The `0xFFFFFFFFu` full-warp mask is correct when all 32 lanes are
+  active, which is guaranteed here because the grid is padded to a warp
+  multiple and out-of-bounds warps return early before reaching the shuffle.
+
+### Next
+Step 55 adds register tiling on the query side: each thread holds Q=4
+query vectors in registers, computing distances to all Q simultaneously
+for each reference, amortizing the global reference-load cost across Q
+computations.
+
+---
+
 ## [Step 53] — Shared-memory reference tiling (2026-05-10)
 
 ### What

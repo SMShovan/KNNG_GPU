@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_warp_top_k` — Step 54: warp-level top-k.
+add_executable(test_gpu_warp_top_k gpu_warp_top_k_test.cpp)
+target_link_libraries(test_gpu_warp_top_k
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_warp_top_k PRIVATE knng::gpu CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_warp_top_k)
+set_target_properties(test_gpu_warp_top_k PROPERTIES OUTPUT_NAME "test_gpu_warp_top_k")
+gtest_discover_tests(test_gpu_warp_top_k
+    PROPERTIES LABELS "gpu;warp" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_tiled_brute_force` — Step 53: shared-memory tiling.
 add_executable(test_gpu_tiled_brute_force gpu_tiled_brute_force_test.cpp)
 target_link_libraries(test_gpu_tiled_brute_force

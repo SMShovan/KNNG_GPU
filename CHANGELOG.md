@@ -12,6 +12,43 @@ independent of the code diff.
 
 ---
 
+## [Step 71] — GPU NN-Descent recall/time Pareto writeup (2026-05-10)
+
+### What
+- Added `docs/PERF_GPU_NND.md`: Phase-9 capstone Pareto document.
+  Sections: datasets & hardware table, `ncu`/benchmark capture commands,
+  Pareto table (CPU BF → CPU NND → GPU BF → GPU NND variants), expected
+  speedup analysis (GPU vs CPU NN-Descent scaling), recall impact of fp16
+  distances, key Nsight Compute metrics for `local_join_kernel`, ASCII
+  schematic Pareto curve, file inventory, Phase-10 preview.
+  All measurement cells are `[TODO]` pending cluster runs.
+- Total tests: 278 (unchanged — documentation step only).
+
+### Why
+The Pareto plot is the primary result artifact for Phase 9, mirroring the
+role of `PERF_SINGLE_GPU.md` for Phase 8 and `NN_DESCENT.md` for Phase 5.
+Recording the expected curves and metrics before measurement enforces the
+hypothesis-before-data discipline: GPU NN-Descent should outperform CPU
+NN-Descent for n > 50K and approach GPU brute-force recall within 1–2%.
+
+### Tradeoff
+- **No measurements yet.** The document will be filled in when the branch
+  is pushed to a V100/MI350A node.  The schematic Pareto curve is derived
+  analytically and marked as estimated.
+
+### Learning
+- The expected fp16 recall impact is analytically bounded at < 0.002 on
+  SIFT-1M (k=10): rank swaps occur only when fp16 rounding closes the gap
+  between the k-th and (k+1)-th neighbor — a rare event for well-separated
+  datasets like SIFT.
+
+### Next
+Phase 10 — CAGRA-style graph refinement (Steps 72–79): fixed out-degree
+enforcement, rank-based reordering (Ootomo et al. 2023), reverse edge
+merging, detour edge pruning, and strong-component merging.
+
+---
+
 ## [Step 70] — Mixed-precision GPU NN-Descent (fp16 distances) (2026-05-10)
 
 ### What

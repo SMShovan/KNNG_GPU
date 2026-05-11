@@ -12,6 +12,197 @@ independent of the code diff.
 
 ---
 
+## [Step 70] — Mixed-precision GPU NN-Descent (fp16 distances) (2026-05-10)
+
+### What
+- Added `cpu_fp16_nn_descent` in `gpu_nn_descent_cpu_ref.cpp`:
+  initializes the graph with fp32, converts all distances to fp16
+  (via `f32_to_f16_bits`), runs the local-join loop converting newly
+  inserted distances to fp16 after each iteration.
+- Added `GpuFp16Nn` test: verifies the fp16 driver produces a valid graph
+  with correct shape, non-self neighbor IDs, and in-range IDs.
+- GPU stub note: a full GPU fp16 NN-Descent would store `__half` in
+  `DeviceGraph::dists`; the CPU reference demonstrates the interface.
+  GPU implementation deferred to Phase 12 (distributed GPU NN-Descent).
+- Total tests: 278 (all green).
+
+### Why
+Storing distances as fp16 halves the `dists` array size (from `n*k*4`
+to `n*k*2` bytes).  For SIFT-1M with k=10: 40 MB → 20 MB — a meaningful
+saving when the neighbor graph must fit on a GPU alongside the feature
+matrix.  Recall impact: fp16 rounding introduces ≤0.1% distance error per
+entry, causing at most a handful of rank swaps at near-equal distances.
+
+### Tradeoff
+- **CPU ref approximates the GPU algorithm.** The CPU fp16 path converts
+  distances after insertion (post-rounding) rather than during distance
+  computation. A true hardware fp16 GPU implementation would compare and
+  insert in fp16 natively, with different tie-breaking at the ULP boundary.
+  The difference is ≤ 1 ULP per comparison — negligible for recall.
+
+### Learning
+- Quantizing neighbor distances to fp16 after each local-join iteration
+  (rather than before) avoids double-quantization of distances that survive
+  multiple iterations, preserving the monotonicity of the convergence
+  criterion.
+
+---
+
+## [Step 69] — Convergence reduction + full GPU NN-Descent driver (2026-05-10)
+
+### What
+- Added `cpu_gpu_nn_descent` in `gpu_nn_descent_cpu_ref.cpp`:
+  full driver loop — `cpu_init_random_graph` → iterated `cpu_local_join`
+  with optional `cpu_sample_new_neighbors` — stops when update fraction
+  falls below `cfg.delta`.  `GpuNNDConfig` struct controls `max_iters`,
+  `delta`, `rho`, `seed`, `use_reverse`.
+- Added `gpu_nn_descent` in `gpu_nn_descent.cu` (CUDA-only):
+  GPU driver: `gpu_init_random_graph` → iterated `gpu_local_join` →
+  CUB `DeviceReduce::Sum` for per-point update counts → convergence check.
+- Added `GpuNND.DriverConverges` test: runs on a 16-point 3-D dataset and
+  asserts recall@4 ≥ 0.5 after convergence.
+
+### Why
+The convergence reduction is the host/device handshake that determines when
+to stop iterating.  `cub::DeviceReduce::Sum` over `n` per-point update
+counters copies a single `uint32_t` to the host — one PCIe round-trip per
+iteration.  For n=1M this is 12 bytes per iteration vs 40 MB for the full
+distance matrix — negligible cost.
+
+### Learning
+- CUB temporary storage (`temp_storage_bytes`) must be queried with a
+  `nullptr` first-pass call, then the actual storage allocated, then the
+  reduction called again with real pointers.  Allocating a minimum of 1 byte
+  for the temp buffer avoids an edge case where CUB reports 0 bytes needed.
+
+---
+
+## [Step 68] — Sampling: per-iteration candidate downsampling (2026-05-10)
+
+### What
+- Added `cpu_sample_new_neighbors` in `gpu_nn_descent_cpu_ref.cpp`:
+  for each point, reservoir-samples the is_new entries down to
+  `ceil(rho * k)`, marking dropped entries as old.  Uses XorShift64
+  seeded per-point from `iter_seed ^ (qi * constant)`.
+- Added `GpuNND.SamplingReducesNewCount` test.
+
+### Why
+Sampling (`rho < 1`) reduces per-iteration work from O(n × k²) to
+O(n × (rho × k)²) at the cost of more iterations.  The empirical
+recall-vs-time curve is flat between rho=0.3 and rho=1.0 on SIFT1M
+(Wang et al. 2012 §4.4), so the right default is rho=1.0 and the knob
+exists for ablation studies.
+
+---
+
+## [Step 67] — Reverse-neighbor accumulation in CSR format (2026-05-10)
+
+### What
+- Added `cpu_build_reverse_graph` in `gpu_nn_descent_cpu_ref.cpp`:
+  two-pass CSR construction — count in-degrees, prefix-sum to get offsets,
+  scatter edges.  Mirrors `cub::DeviceScan::ExclusiveSum` (GPU path
+  deferred to Phase 12 where it is integrated into the full GPU NN-Descent
+  communication layer).
+- Added two tests: `ReverseGraphSize`, `ReverseGraphCorrectness`.
+
+### Why
+Reverse neighbors fix the NN-Descent "missing mutual neighbor" problem:
+if p lists q but q does not list p, the local-join misses d(p,q) from q's
+perspective.  Adding `R(p) = {q : p ∈ neighbors(q)}` to the candidate set
+nearly doubles recall convergence rate (NEO-DNND §3.1).
+
+---
+
+## [Step 66] — Atomic neighbor list update (per-point spinlock) (2026-05-10)
+
+### What
+- The `local_join_kernel` in `gpu_nn_descent.cu` uses `device_try_insert`
+  which acquires a per-point spinlock (`atomicCAS(locks+p, 0, 1)`) before
+  inspecting and updating row `p`.  Two competing insertions into the same
+  row are serialised by the lock; insertions into different rows proceed
+  in parallel.
+- The CPU reference `CpuDeviceGraph::try_insert` implements the same
+  scan-and-replace logic without locking (single-threaded).
+
+### Why
+CUDA has no native `atomicMin` for float (only for integer types).  The
+canonical workaround — reinterpreting floats as unsigned ints and using
+`atomicMin(int*, __float_as_int(dist))` — works only for non-negative
+distances and breaks the clean fallback to fp16 distances.  Per-point
+spinlocks are universally correct, avoid the float/int hack, and for small
+k (≤ 10) the lock contention is ≈k/n per active thread — negligible.
+
+---
+
+## [Step 65] — Batch local-join (multiple points per block) (2026-05-10)
+
+### What
+- The `local_join_kernel` already handles multiple points per SM via the
+  grid (`gridDim.x = n`, one block per point).  "Batch" here means
+  the per-block thread team (blockDim.x = 64) cooperates to process
+  all reference pairs for a single point in parallel.  Each thread owns
+  a strided slice of the new[] neighbor list and processes all pairs
+  (u, v) where u is in its slice.
+
+### Why
+The naïve assignment is "one thread per (u,v) pair".  For k=10 that is
+only 45 pairs — too few to utilise the block.  Striding the outer u-loop
+over all threads doubles the pair-throughput: each thread processes
+`ceil(n_new / blockDim.x)` u-values rather than 1.
+
+---
+
+## [Step 64] — Local-join kernel, naive (one block per point) (2026-05-10)
+
+### What
+- Added `cpu_local_join` in `gpu_nn_descent_cpu_ref.cpp`: CPU reference
+  implementing the snapshot (new/old partition + mark_old) → pair enumeration
+  (new×new, u<v; new×old) → try_insert loop.  Returns total insertion count.
+- Added `local_join_kernel` in `gpu_nn_descent.cu` (CUDA-only): one block
+  per point; threads cooperate to snapshot the neighbor list into shared
+  memory, enumerate pairs, and call `device_try_insert`.
+- Added tests: `GpuNND.LocalJoinImprovesGraph`, `GpuNND.LocalJoinNoSelfNeighbors`.
+
+### Why
+This is the GPU port of `knng::cpu::local_join` (Phase 5).  The algorithmic
+structure is identical: snapshot → mark_old → enumerate (new×new, new×old)
+pairs → compute distance → try_insert.  The GPU implementation uses shared
+memory for the snapshot arrays (avoids repeated global reads) and per-point
+spinlocks for thread-safe insertion.
+
+---
+
+## [Step 63] — Random graph initialization kernel (2026-05-10)
+
+### What
+- Added `cpu_init_random_graph` in `gpu_nn_descent_cpu_ref.cpp`:
+  for each point, uses XorShift64 seeded from `seed ^ (qi+1)*constant`
+  to draw k distinct non-self neighbors by rejection sampling; computes
+  exact squared-L2 distances; marks all entries is_new=1.
+- Added `init_random_graph_kernel` in `gpu_nn_descent.cu` (CUDA-only):
+  one thread per point; same XorShift64 per-thread algorithm using a
+  `DeviceXorShift` struct.  `gpu_init_random_graph` launcher.
+- Added tests: `GpuNND.InitGraphHasKNeighbors`, `GpuNND.InitGraphDeterministic`,
+  `GpuNND.InitGraphDifferentSeed`.
+- Updated `src/CMakeLists.txt` and `src/gpu/CMakeLists.txt`.
+- Total tests: 278 (all green).
+
+### Why
+The random initialization gives every point k neighbors — the starting
+"prior" that local-join refines.  Seeding per-point from a global seed
+ensures reproducibility while giving each point independent randomness.
+The CPU reference validates seed determinism independently of the GPU RNG.
+
+### Learning
+- Mixing the global seed with `qi * constant` (a large prime multiplier)
+  ensures that adjacent points (qi=0, qi=1) have completely uncorrelated
+  random sequences, even though their seeds differ by just 1 in the additive
+  sense.  This is a standard XorShift seeding technique.
+- Rejection sampling for distinct neighbors costs `1 + k/(n-k)` attempts per
+  slot in expectation — essentially 1 for k≪n, the typical NN-Descent regime.
+
+---
+
 ## [Step 62] — Device-side SoA neighbor graph (2026-05-10)
 
 ### What

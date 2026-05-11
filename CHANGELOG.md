@@ -12,6 +12,48 @@ independent of the code diff.
 
 ---
 
+## [Step 62] — Device-side SoA neighbor graph (2026-05-10)
+
+### What
+- Added `include/knng/gpu/device_graph.hpp`: `CpuDeviceGraph` (host-side
+  SoA mirror, always compiled) and `DeviceGraph` (device-side SoA via
+  `DeviceBuffer`, CUDA/CPU-stub compatible).  Both hold flat `[n×k]` arrays:
+  `ids` (neighbor indices), `dists` (distances), `flags` (bit 0 = is_new).
+  `kNndMaxK = 64`, `kSentinelDist = 1e38f`.  Conversion helpers:
+  `from_knng`, `to_knng`, `to_cpu`, `DeviceGraph(CpuDeviceGraph)`.
+  `CpuDeviceGraph` also provides: `try_insert`, `worst_dist`, `mark_old`,
+  row-indexed accessor helpers (`id()`, `dist()`, `flag()`).
+- Added `src/gpu/device_graph.cpp` → `knng::gpu_ref`: implementations of
+  all `CpuDeviceGraph` and `DeviceGraph` methods.
+- Added `tests/gpu_device_graph_test.cpp`: 9 tests — default-construct,
+  from_knng, to_knng, try_insert-better/worst/duplicate, mark_old,
+  device-round-trip, device-upload-download. Total: 268 (green).
+
+### Why
+The CPU `NnDescentGraph` uses heap-allocated per-point `NeighborList`s —
+incompatible with GPU memory and incapable of coalesced access.  `DeviceGraph`
+replaces it with a three-array SoA layout that:
+1. Fits in `DeviceBuffer` allocations (contiguous device memory).
+2. Gives coalesced warp access when 32 threads read the same field
+   (ids, dists, or flags) for 32 consecutive points.
+3. Supports atomic update via `GPU_CHECK(atomicExch(lock_arr+p, 1))`
+   in Steps 65–69.
+
+### Tradeoff
+- **No AoS `DeviceNeighborList` struct.** The plan mentioned a packed AoS
+  struct for 128-byte alignment.  After analysis, SoA dominates for both
+  access patterns (per-point and batch), so AoS is not implemented.
+  The 128-byte alignment target is achieved at the row boundary:
+  for k=16, each row of the ids array is 64 bytes (aligned); for k=32,
+  128 bytes exactly.
+
+### Next
+Step 63 implements the random graph initialization kernel: each GPU thread
+initializes one point's k neighbors using a per-thread XorShift64 RNG
+seeded from the thread index and a global seed.
+
+---
+
 ## [Step 61] — Single-GPU performance waterfall writeup (2026-05-10)
 
 ### What

@@ -249,6 +249,18 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_device_graph` — Step 62: GPU SoA neighbor graph.
+add_executable(test_gpu_device_graph gpu_device_graph_test.cpp)
+target_link_libraries(test_gpu_device_graph
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_device_graph PRIVATE knng::gpu CUDA::cudart)
+endif()
+knng_set_warnings(test_gpu_device_graph)
+set_target_properties(test_gpu_device_graph PROPERTIES OUTPUT_NAME "test_gpu_device_graph")
+gtest_discover_tests(test_gpu_device_graph
+    PROPERTIES LABELS "gpu;nnd;device_graph" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_hip_portability` — Step 60: HIP portability layer compile checks.
 add_executable(test_gpu_hip_portability gpu_hip_portability_test.cpp)
 target_link_libraries(test_gpu_hip_portability

@@ -12,6 +12,76 @@ independent of the code diff.
 
 ---
 
+## [Phase 9 audit fixes] — Missing steps completed (2026-05-12)
+
+### What
+An audit against the plan revealed six gaps in the Phase-9 implementation.
+This commit closes all of them:
+
+**Step 61 — `include/knng/gpu/neighbor_list.cuh`** (was missing):
+- `DeviceNeighborList<K_MAX>` AoS struct with `alignas(128)` for 128-byte
+  boundary alignment. Default `K_MAX = 16` → 132 bytes data → 256-byte struct.
+  Provides `set_new`, `set_old`, `is_new`, `mark_all_old` GPU/host methods.
+  Templated `aos_to_soa` and `soa_to_aos` conversion helpers.
+  Comprehensive layout analysis comment: AoS vs SoA performance breakdown.
+- 8 new tests in `test_gpu_neighbor_list` covering struct sizes (8→128,
+  16→256, 32→384 bytes), alignment=128, flag bit manipulation, and AoS↔SoA
+  round-trip conversion.
+
+**Step 63 — Dead code removed** from `local_join_kernel`:
+- The aborted pair-enumeration while-loop (lines 213–234 in old version)
+  with its `break;` jump was removed. The linear strided enumeration that
+  was already correct is the only path now.
+
+**Step 64 — `local_join_batch_kernel`** (was missing):
+- New kernel: `kBatchPts = 4` points per block, one warp per point.
+  Each lane handles one entry of the `new[]` list (possible because k≤32).
+  Warp-synchronous with `__syncwarp`. Automatically selected by
+  `gpu_local_join` when k ≤ 32.
+
+**Step 65 — `device_try_insert_atomicmin`** (was missing):
+- Added `atomicMin`-based insertion variant exploiting the IEEE-754
+  non-negative-float ordering property: `atomicMin(int*, __float_as_int(dist))`
+  atomically updates the worst-slot distance; then a locked id/flag update
+  follows only if we won the slot. Both variants are now in the file.
+
+**Step 66 — GPU reverse graph with CUB `DeviceScan::ExclusiveSum`** (was CPU-only):
+- `build_reverse_indegrees_kernel`: `atomicAdd` to count in-degrees.
+- `build_reverse_scatter_kernel`: scatter edges into CSR positions.
+- `gpu_build_reverse_graph`: two-pass launcher using
+  `cub::DeviceScan::ExclusiveSum` for the offset prefix-sum.
+- Declared in `gpu_nn_descent.hpp`.
+
+**Step 67 — `sample_new_neighbors_kernel`** (was CPU-only):
+- GPU reservoir-sampling kernel: per-thread XorShift drops
+  `(new_count − ceil(rho×k))` new entries; remaining entries stay new.
+- `gpu_sample_new_neighbors` launcher; integrates into `gpu_nn_descent`
+  driver when `cfg.rho < 1.0`.
+- Declared in `gpu_nn_descent.hpp`.
+
+**Step 69 — `local_join_fp16_kernel` + `gpu_nn_descent_fp16`** (was stub):
+- `local_join_fp16_kernel`: same pair enumeration as the naive kernel but
+  reads/writes distances as `__half`; compares `__half2float(d)` in fp32
+  to avoid ranking errors; stores `__float2half(new_dist)` on insertion.
+- `gpu_nn_descent_fp16`: converts initial fp32 distances → fp16 via
+  `fp32_to_fp16_kernel`, runs `local_join_fp16_kernel` iterations with CUB
+  `DeviceReduce::Sum` for convergence, returns `Knng` with fp32 distances
+  read back from fp16 storage.
+- Declared in `gpu_nn_descent.hpp`.
+
+Also added `test_gpu_nnd_reverse_sampling`: 8 tests covering reverse-graph
+total edge count, reverse-graph correctness, offset monotonicity, sampling
+reduces new count, rho=1 no-op, sampling determinism, fp16 NND valid graph,
+fp16 NND recall. GPU variants of reverse graph, sampling, and fp16 NND are
+guarded by `#ifdef KNNG_HAVE_CUDA`.
+
+Total tests: 294 (all green on Mac CPU-stub).
+
+### Next
+Phase 10 — CAGRA-style graph refinement (Steps 72–79).
+
+---
+
 ## [Step 71] — GPU NN-Descent recall/time Pareto writeup (2026-05-10)
 
 ### What

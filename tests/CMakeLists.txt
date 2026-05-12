@@ -249,6 +249,27 @@ gtest_discover_tests(test_nn_descent
 # multi-rank setup. MPI_Allreduce with one rank degenerates to a
 # local identity, which validates the MPI wiring end-to-end.
 # Only built when `KNNG_HAVE_MPI` is ON.
+# `test_gpu_neighbor_list` — Step 61: DeviceNeighborList AoS struct.
+add_executable(test_gpu_neighbor_list gpu_neighbor_list_test.cpp)
+target_link_libraries(test_gpu_neighbor_list
+    PRIVATE knng::core GTest::gtest_main)
+knng_set_warnings(test_gpu_neighbor_list)
+set_target_properties(test_gpu_neighbor_list PROPERTIES OUTPUT_NAME "test_gpu_neighbor_list")
+gtest_discover_tests(test_gpu_neighbor_list
+    PROPERTIES LABELS "gpu;nnd;neighbor_list" DISCOVERY_TIMEOUT 10)
+
+# `test_gpu_nnd_reverse_sampling` — Steps 66-67 & 69: reverse graph, sampling, fp16.
+add_executable(test_gpu_nnd_reverse_sampling gpu_nnd_reverse_sampling_test.cpp)
+target_link_libraries(test_gpu_nnd_reverse_sampling
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_nnd_reverse_sampling PRIVATE knng::gpu CUDA::cudart CUDA::cublas)
+endif()
+knng_set_warnings(test_gpu_nnd_reverse_sampling)
+set_target_properties(test_gpu_nnd_reverse_sampling PROPERTIES OUTPUT_NAME "test_gpu_nnd_reverse_sampling")
+gtest_discover_tests(test_gpu_nnd_reverse_sampling
+    PROPERTIES LABELS "gpu;nnd;reverse;sampling" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_nn_descent` — Steps 63-70: GPU NN-Descent algorithm.
 add_executable(test_gpu_nn_descent gpu_nn_descent_test.cpp)
 target_link_libraries(test_gpu_nn_descent

@@ -47,7 +47,7 @@ namespace knng::gpu {
     std::uint64_t        seed = 42);
 
 #if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
-/// @brief GPU random k-NN graph initialization.
+/// @brief GPU random k-NN graph initialization (Step 62).
 [[nodiscard]] DeviceGraph gpu_init_random_graph(
     const knng::Dataset& dataset,
     std::size_t          k,
@@ -72,12 +72,34 @@ std::size_t cpu_local_join(
     CpuDeviceGraph&      graph);
 
 #if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
-/// @brief GPU naive local-join: one block per point.
+/// @brief GPU local-join (Steps 63–65): selects batch or naive variant.
 ///
-/// @return  Number of insertions that changed a row (copied back to host).
+/// Batch kernel (Step 64): 4 points per block (one warp per point) when k≤32.
+/// Naive kernel (Step 63): 1 block per point for larger k.
+/// Both use per-point spinlocks (Step 65) and CUB DeviceReduce (Step 68).
+///
+/// @return  Number of insertions that changed a row.
 std::size_t gpu_local_join(
     const knng::Dataset& dataset,
     DeviceGraph&         graph);
+
+/// @brief GPU reverse-neighbor graph via CUB DeviceScan::ExclusiveSum (Step 66).
+void gpu_build_reverse_graph(
+    const DeviceGraph&           fwd,
+    DeviceBuffer<knng::index_t>& rev_ids,
+    DeviceBuffer<unsigned int>&  rev_offsets);
+
+/// @brief GPU reservoir sampling: mark ceil(rho*k) new entries per point (Step 67).
+void gpu_sample_new_neighbors(
+    DeviceGraph&  graph,
+    double        rho,
+    std::uint64_t iter_seed);
+
+/// @brief GPU NN-Descent with fp16 distance storage (Step 69).
+[[nodiscard]] knng::Knng gpu_nn_descent_fp16(
+    const knng::Dataset& dataset,
+    std::size_t          k,
+    const GpuNNDConfig&  cfg = {});
 #endif
 
 // ===========================================================================

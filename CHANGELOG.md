@@ -12,6 +12,45 @@ independent of the code diff.
 
 ---
 
+## [Step 82] — Point-sharded multi-GPU brute-force (2026-05-13)
+
+### What
+- **`include/knng/gpu/multi_gpu.hpp`**: `MultiGpuConfig` (n_gpus, k, rho,
+  n_iterations, verbose); `PointShard` (begin/end/rank); `partition_points`;
+  `cpu_multi_brute_force_point`, `cpu_multi_brute_force_tile`,
+  `cpu_multi_nn_descent` declarations.
+- **CPU reference** (`src/gpu/multi_gpu_cpu_ref.cpp`):
+  `partition_points` — round-robin assignment of remainder rows to first ranks.
+  `cpu_multi_brute_force_point` — each virtual rank processes its shard's
+  queries against all reference vectors (simulating NCCL bcast of references),
+  maintains a per-query max-heap top-k, merges on rank 0 via shared CPU arrays.
+- **Tests**: `PartitionPoints_EvenSplit`, `PartitionPoints_WithRemainder`,
+  `PointSharded_MatchesSingleGpu_SmallDataset` (3 new tests, 13 total).
+
+### Why
+Point-sharding is the simplest multi-GPU partition strategy: shard the query
+set, broadcast the full reference set to every GPU, each GPU computes local
+top-k, gather results on rank 0.  It requires O(n × d) bytes broadcast per
+GPU — only feasible when the dataset fits in GPU memory, but correct and easy
+to reason about.  It is the baseline against which tile-sharding (Step 83)
+demonstrates the memory-reduction trade-off.
+
+### Tradeoff
+Broadcasting the full reference set to every GPU is O(n × d) per rank.  For
+SIFT-1M (n=10⁶, d=128, float32) this is 512 MB per GPU — already tight on
+most cards.  For larger datasets, tile-sharding (Step 83) reduces this to
+O(tile_size × d) per rank at the cost of AllToAll communication.
+
+### Learning
+The max-heap top-k in the CPU reference deliberately mirrors the GPU kernel
+design: maintain a fixed-size heap, evict worst-so-far, then sort at the end.
+This is the same pattern as Phase 7's block-per-query brute-force (Step 49).
+
+### Next
+Step 83: tile-sharded multi-GPU brute-force.
+
+---
+
 ## [Step 81] — Device discovery + P2P topology probe (2026-05-13)
 
 ### What

@@ -15,6 +15,9 @@
 using knng::gpu::CpuSimCollective;
 using knng::gpu::Topology;
 using knng::gpu::PeerLinkType;
+using knng::gpu::MultiGpuConfig;
+using knng::gpu::partition_points;
+using knng::gpu::cpu_multi_brute_force_point;
 
 // ===========================================================================
 // Step 80 — CPU collective simulation
@@ -94,6 +97,59 @@ TEST(Topology, ToStringContainsGpuCount) {
     const auto t = Topology::simulate(2);
     const auto s = t.to_string();
     EXPECT_NE(s.find("2 GPUs"), std::string::npos);
+}
+
+// ===========================================================================
+// Step 82 — Point-sharded multi-GPU brute-force
+// ===========================================================================
+
+TEST(MultiGpu, PartitionPoints_EvenSplit) {
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 4;
+    const auto shards = partition_points(8, cfg);
+    ASSERT_EQ(shards.size(), 4u);
+    EXPECT_EQ(shards[0].begin, 0u); EXPECT_EQ(shards[0].end, 2u);
+    EXPECT_EQ(shards[1].begin, 2u); EXPECT_EQ(shards[1].end, 4u);
+    EXPECT_EQ(shards[2].begin, 4u); EXPECT_EQ(shards[2].end, 6u);
+    EXPECT_EQ(shards[3].begin, 6u); EXPECT_EQ(shards[3].end, 8u);
+    EXPECT_EQ(shards[0].rank, 0); EXPECT_EQ(shards[3].rank, 3);
+}
+
+TEST(MultiGpu, PartitionPoints_WithRemainder) {
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 3;
+    const auto shards = partition_points(10, cfg);
+    std::size_t total = 0;
+    for (const auto& s : shards) total += s.size();
+    EXPECT_EQ(total, 10u);
+}
+
+TEST(MultiGpu, PointSharded_MatchesSingleGpu_SmallDataset) {
+    // 8 points in 2D, k=2, 2 virtual GPUs
+    const std::size_t n = 8, d = 2, k = 2;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d;
+    ds.data.resize(n * d);
+    for (std::size_t i = 0; i < n; ++i) {
+        ds.data[i*d+0] = static_cast<float>(i);
+        ds.data[i*d+1] = 0.f;
+    }
+
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 2; cfg.k = static_cast<int>(k);
+
+    const auto result = cpu_multi_brute_force_point(ds, cfg);
+    ASSERT_EQ(result.n, n);
+    ASSERT_EQ(result.k, k);
+
+    // Every returned neighbor id must be < n and differ from the query
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t r = 0; r < k; ++r) {
+            const auto id = result.neighbors[i*k+r];
+            EXPECT_LT(static_cast<std::size_t>(id), n);
+            EXPECT_NE(static_cast<std::size_t>(id), i);
+            EXPECT_GE(result.distances[i*k+r], 0.f);
+        }
 }
 
 TEST(NcclComm, CpuSim_ReduceScatter_FourRanks) {

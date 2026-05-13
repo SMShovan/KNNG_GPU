@@ -114,4 +114,30 @@ void gpu_prune_detour_edges(DeviceGraph& graph,
                              std::size_t dim);
 #endif
 
+// ---------------------------------------------------------------------------
+// Step 76 — Strong-component merging
+// ---------------------------------------------------------------------------
+
+/// @brief Detect weakly connected components (union-find on the undirected
+/// adjacency) and, for each isolated component, add a bridge edge from its
+/// most central node to the closest node in the largest component.
+///
+/// After pruning (Step 75), some nodes may lose all valid neighbors and
+/// become unreachable singletons.  This step reconnects them so the final
+/// graph is a single weakly connected component.
+///
+/// @param graph    In/out SoA graph (mutated in place).
+/// @param vectors  Row-major float matrix, shape [n × dim].
+/// @param dim      Feature dimension.
+void cpu_merge_components(CpuDeviceGraph& graph,
+                           const float* vectors,
+                           std::size_t dim);
+
+#if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
+/// @brief GPU: label propagation to find components then bridge singletons.
+void gpu_merge_components(DeviceGraph& graph,
+                           const float* d_vectors,
+                           std::size_t dim);
+#endif
+
 } // namespace knng::gpu

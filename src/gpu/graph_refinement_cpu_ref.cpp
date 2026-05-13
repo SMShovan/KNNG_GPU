@@ -208,4 +208,88 @@ void cpu_prune_detour_edges(CpuDeviceGraph& graph,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step 76 — Strong-component merging (CPU reference)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::size_t uf_find(std::vector<std::size_t>& parent, std::size_t x) {
+    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+}
+
+void uf_union(std::vector<std::size_t>& parent,
+              std::vector<std::size_t>& rank_uf,
+              std::size_t a, std::size_t b) {
+    a = uf_find(parent, a); b = uf_find(parent, b);
+    if (a == b) return;
+    if (rank_uf[a] < rank_uf[b]) std::swap(a, b);
+    parent[b] = a;
+    if (rank_uf[a] == rank_uf[b]) ++rank_uf[a];
+}
+
+} // anonymous namespace
+
+void cpu_merge_components(CpuDeviceGraph& graph,
+                           const float* vectors,
+                           std::size_t dim) {
+    const std::size_t n = graph.n;
+    const std::size_t k = graph.k;
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+
+    // Build union-find on the undirected graph
+    std::vector<std::size_t> parent(n), rank_uf(n, 0u);
+    std::iota(parent.begin(), parent.end(), 0u);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t r = 0; r < k; ++r) {
+            const knng::index_t j = graph.ids[i * k + r];
+            if (j == kSentinel) break;
+            uf_union(parent, rank_uf, i, static_cast<std::size_t>(j));
+        }
+    }
+
+    // Find the largest component (by root count)
+    std::vector<std::size_t> comp_size(n, 0u);
+    for (std::size_t i = 0; i < n; ++i) ++comp_size[uf_find(parent, i)];
+    const std::size_t main_root = static_cast<std::size_t>(
+        std::max_element(comp_size.begin(), comp_size.end()) - comp_size.begin());
+
+    // For each node not in the main component, find its closest node in the
+    // main component and add a bridge edge (replacing the worst slot or a sentinel).
+    for (std::size_t i = 0; i < n; ++i) {
+        if (uf_find(parent, i) == main_root) continue;
+
+        float   best_dist = std::numeric_limits<float>::infinity();
+        std::size_t best_j = n;
+        for (std::size_t j = 0; j < n; ++j) {
+            if (uf_find(parent, j) != main_root) continue;
+            const float d = sq_l2(vectors + i * dim, vectors + j * dim, dim);
+            if (d < best_dist) { best_dist = d; best_j = j; }
+        }
+        if (best_j == n) continue;
+
+        // Find a slot: prefer sentinel, else evict worst
+        std::size_t target_slot = k;
+        float       worst_d     = -1.f;
+        std::size_t worst_slot  = k;
+        for (std::size_t r = 0; r < k; ++r) {
+            const knng::index_t id = graph.ids[i * k + r];
+            if (id == kSentinel) { target_slot = r; break; }
+            if (graph.dists[i * k + r] > worst_d) {
+                worst_d = graph.dists[i * k + r]; worst_slot = r;
+            }
+        }
+        if (target_slot == k) target_slot = worst_slot;
+        if (target_slot == k) continue;
+
+        graph.ids  [i * k + target_slot] = static_cast<knng::index_t>(best_j);
+        graph.dists[i * k + target_slot] = best_dist;
+        graph.flags[i * k + target_slot] = 0u;
+
+        // Merge the two components so subsequent isolated nodes see the updated graph
+        uf_union(parent, rank_uf, i, best_j);
+    }
+}
+
 } // namespace knng::gpu

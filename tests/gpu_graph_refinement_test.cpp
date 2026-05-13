@@ -18,6 +18,7 @@ using knng::gpu::cpu_enforce_out_degree;
 using knng::gpu::cpu_rank_reorder;
 using knng::gpu::cpu_add_reverse_edges;
 using knng::gpu::cpu_prune_detour_edges;
+using knng::gpu::cpu_merge_components;
 using knng::gpu::kSentinelDist;
 
 static CpuDeviceGraph make_graph(std::size_t n, std::size_t k,
@@ -232,6 +233,67 @@ TEST(GraphRefinement, PruneDetour_AllSentinels_NoChange) {
     cpu_prune_detour_edges(g, vecs.data(), 2);
     EXPECT_EQ(g.ids[0], S);
     EXPECT_EQ(g.ids[1], S);
+}
+
+// ===========================================================================
+// Step 76 — Strong-component merging
+// ===========================================================================
+
+// Two isolated singletons (0, 1) with no edges. After merge, at least one
+// should have a valid neighbor connecting the two.
+TEST(GraphRefinement, MergeComponents_ConnectsSingletons) {
+    const auto S = static_cast<knng::index_t>(-1);
+    // 2 points, k=1, both singletons
+    CpuDeviceGraph g(2, 1);
+    g.ids   = {S, S};
+    g.dists = {kSentinelDist, kSentinelDist};
+    std::vector<float> vecs = {0.f, 0.f,  1.f, 0.f};
+    cpu_merge_components(g, vecs.data(), 2);
+    // At least one direction must now have a valid edge
+    const bool any_connected = (g.ids[0] != S || g.ids[1] != S);
+    EXPECT_TRUE(any_connected);
+}
+
+// Already connected graph: node 0→1, 1→0. No change expected.
+TEST(GraphRefinement, MergeComponents_AlreadyConnected_NoChange) {
+    CpuDeviceGraph g(2, 1);
+    g.ids   = {1u, 0u};
+    g.dists = {1.f, 1.f};
+    const auto before_ids = g.ids;
+    std::vector<float> vecs = {0.f, 0.f,  1.f, 0.f};
+    cpu_merge_components(g, vecs.data(), 2);
+    EXPECT_EQ(g.ids, before_ids);
+}
+
+// 4 nodes: two pairs (0-1 connected, 2-3 connected) but no edges between pairs.
+// After merge, nodes from different pairs should be bridged.
+TEST(GraphRefinement, MergeComponents_TwoComponentsBridged) {
+    const auto S = static_cast<knng::index_t>(-1);
+    // k=2: each node can hold 2 neighbors
+    CpuDeviceGraph g(4, 2);
+    g.ids   = {1u, S,   0u, S,   3u, S,   2u, S};
+    g.dists = {1.f, kSentinelDist, 1.f, kSentinelDist,
+               1.f, kSentinelDist, 1.f, kSentinelDist};
+    // Vectors: 0=(0,0),1=(1,0) close; 2=(10,0),3=(11,0) close but far from 0/1
+    std::vector<float> vecs = {0.f,0.f, 1.f,0.f, 10.f,0.f, 11.f,0.f};
+    cpu_merge_components(g, vecs.data(), 2);
+    // Nodes 0 or 1 should now have an edge to node 2 or 3 (or vice versa)
+    bool bridge_found = false;
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t r = 0; r < 2; ++r) {
+            const auto id = g.ids[i * 2 + r];
+            if (id == S) continue;
+            // Bridge: node in {0,1} connects to node in {2,3}
+            const bool from_left = (i <= 1);
+            const bool to_right  = (id >= 2u);
+            const bool from_right = (i >= 2);
+            const bool to_left   = (id <= 1u);
+            if ((from_left && to_right) || (from_right && to_left)) {
+                bridge_found = true;
+            }
+        }
+    }
+    EXPECT_TRUE(bridge_found);
 }
 
 // ===========================================================================

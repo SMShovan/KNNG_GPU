@@ -12,6 +12,54 @@ independent of the code diff.
 
 ---
 
+## [Step 76] — Strong-component merging (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: adds `cpu_merge_components` /
+  `gpu_merge_components` declarations.
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_merge_components` — union-find (path-halving, union-by-rank) on the
+  undirected adjacency; identifies the largest component; for every isolated
+  node brute-force-searches the closest node in the main component and inserts
+  a bridge edge (sentinel slot first, then evict worst); updates the
+  union-find so subsequent bridges can use the growing main component.
+  Helper `uf_find` (iterative path-halving) and `uf_union` in anonymous namespace.
+- **GPU kernels** (`src/gpu/graph_refinement.cu`):
+  `label_propagate_kernel` — each thread adopts min(self, neighbors) label;
+  `d_changed` flag detects convergence.  `bridge_components_kernel` — one
+  thread per isolated node; brute-force nearest search in main component;
+  writes bridge to first sentinel slot.
+- **Tests**: `MergeComponents_ConnectsSingletons`,
+  `MergeComponents_AlreadyConnected_NoChange`,
+  `MergeComponents_TwoComponentsBridged` (3 new tests, 16 total).
+
+### Why
+Step 75 (pruning) can eliminate all edges from sparsely-connected nodes,
+producing disconnected components that are unreachable during beam-search.
+Component merging guarantees the final graph is a single weakly connected
+component, a necessary precondition for bounded search complexity.
+
+### Tradeoff
+The CPU reference is O(n²) for the bridge-search loop — acceptable for
+validation but not production.  The GPU `bridge_components_kernel` is also
+O(n²) per isolated node; for large n a PQ-based nearest search in the main
+component (using the existing NN-Descent infrastructure) would be faster.
+Label propagation converges in O(diameter) passes; in the worst case
+(a path graph) this is O(n) passes of O(n) work = O(n²) total.
+
+### Learning
+Union-find is the correct data structure here because we only need weakly
+connected components (symmetric undirected reachability), not SCCs.  Label
+propagation on the GPU converges faster in practice (typically < 10 passes
+for real ANN graphs) and avoids the serial bottleneck of path-halving across
+many threads.
+
+### Next
+Step 77: ablation driver — `cpu_refine_graph` that chains Steps 72–76 with
+config flags.
+
+---
+
 ## [Step 75] — Detourable-edge pruning — MRNG rule (2026-05-13)
 
 ### What

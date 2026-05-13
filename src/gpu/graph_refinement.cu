@@ -6,9 +6,14 @@
 ///   Step 73: `build_ranks_kernel`, `rank_sort_kernel`
 ///   Step 74: `add_reverse_edges_kernel`
 ///   Step 75: `prune_detour_kernel`
+///   Step 76: `label_propagate_kernel`, `bridge_components_kernel`
 
 #include <knng/gpu/graph_refinement.hpp>
 #include <knng/gpu/device_graph.hpp>
+
+#include <algorithm>
+#include <numeric>
+#include <vector>
 
 namespace knng::gpu {
 
@@ -330,6 +335,126 @@ void gpu_prune_detour_edges(DeviceGraph& graph,
     GPU_LAUNCH(prune_detour_kernel, n, 32u, 0, nullptr,
                graph.ids.data(), graph.dists.data(), graph.flags.data(),
                d_vectors, n, ku, dmu);
+    GPU_SYNC();
+}
+
+// ===========================================================================
+// Step 76 — Strong-component merging (label propagation + bridge)
+// ===========================================================================
+
+/// Label propagation: each node adopts the minimum label among itself and its
+/// neighbors.  Converges in O(diameter) iterations.
+GPU_GLOBAL void label_propagate_kernel(
+    const knng::index_t* d_ids,
+    unsigned int*        d_labels,
+    unsigned int         n,
+    unsigned int         k,
+    unsigned int*        d_changed)
+{
+    const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+
+    unsigned int my_label = d_labels[i];
+    for (unsigned int r = 0; r < k; ++r) {
+        const knng::index_t j = d_ids[i * k + r];
+        if (j == kSentinel) break;
+        const unsigned int jl = d_labels[static_cast<unsigned int>(j)];
+        if (jl < my_label) my_label = jl;
+    }
+    if (my_label != d_labels[i]) {
+        d_labels[i] = my_label;
+        atomicOr(d_changed, 1u);
+    }
+}
+
+/// For each node not in the main component, find its nearest neighbor in the
+/// main component (brute-force, one thread per isolated node) and add a bridge.
+GPU_GLOBAL void bridge_components_kernel(
+    knng::index_t*       d_ids,
+    float*               d_dists,
+    std::uint32_t*       d_flags,
+    const unsigned int*  d_labels,
+    const float*         d_vectors,
+    unsigned int         main_label,
+    unsigned int         n,
+    unsigned int         k,
+    unsigned int         dim)
+{
+    const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (d_labels[i] == main_label) return;
+
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+    float best_dist = 3.402823466e+38f;
+    unsigned int best_j = n;
+
+    for (unsigned int j = 0; j < n; ++j) {
+        if (d_labels[j] != main_label) continue;
+        const float* vi = d_vectors + static_cast<std::size_t>(i) * dim;
+        const float* vj = d_vectors + static_cast<std::size_t>(j) * dim;
+        float d = 0.f;
+        for (unsigned int dd = 0; dd < dim; ++dd) {
+            const float diff = vi[dd] - vj[dd];
+            d += diff * diff;
+        }
+        if (d < best_dist) { best_dist = d; best_j = j; }
+    }
+    if (best_j == n) return;
+
+    // Find a sentinel slot; if none, overwrite index 0 (worst eviction heuristic)
+    unsigned int target = 0u;
+    for (unsigned int r = 0; r < k; ++r) {
+        if (d_ids[i * k + r] == kSentinel) { target = r; break; }
+    }
+    d_ids  [i * k + target] = static_cast<knng::index_t>(best_j);
+    d_dists[i * k + target] = best_dist;
+    d_flags[i * k + target] = 0u;
+}
+
+void gpu_merge_components(DeviceGraph& graph,
+                           const float* d_vectors,
+                           std::size_t dim) {
+    const auto n   = static_cast<unsigned int>(graph.n);
+    const auto ku  = static_cast<unsigned int>(graph.k);
+    const auto dmu = static_cast<unsigned int>(dim);
+    const unsigned int threads = 256u;
+    const unsigned int blocks  = (n + threads - 1u) / threads;
+
+    DeviceBuffer<unsigned int> d_labels(n);
+    // Initialize labels[i] = i
+    {
+        std::vector<unsigned int> h(n);
+        std::iota(h.begin(), h.end(), 0u);
+        GPU_CHECK(cudaMemcpy(d_labels.data(), h.data(), n * sizeof(unsigned int),
+                             cudaMemcpyHostToDevice));
+    }
+
+    // Label propagation until convergence
+    DeviceBuffer<unsigned int> d_changed(1);
+    for (int iter = 0; iter < static_cast<int>(n); ++iter) {
+        GPU_CHECK(cudaMemset(d_changed.data(), 0, sizeof(unsigned int)));
+        GPU_LAUNCH(label_propagate_kernel, blocks, threads, 0, nullptr,
+                   graph.ids.data(), d_labels.data(), n, ku, d_changed.data());
+        GPU_SYNC();
+        unsigned int changed = 0;
+        GPU_CHECK(cudaMemcpy(&changed, d_changed.data(), sizeof(unsigned int),
+                             cudaMemcpyDeviceToHost));
+        if (!changed) break;
+    }
+
+    // Find main component (label with most members)
+    std::vector<unsigned int> h_labels(n);
+    GPU_CHECK(cudaMemcpy(h_labels.data(), d_labels.data(), n * sizeof(unsigned int),
+                         cudaMemcpyDeviceToHost));
+    std::vector<unsigned int> cnt(n, 0u);
+    for (auto l : h_labels) ++cnt[l];
+    const unsigned int main_label = static_cast<unsigned int>(
+        std::max_element(cnt.begin(), cnt.end()) - cnt.begin());
+
+    GPU_LAUNCH(bridge_components_kernel, blocks, threads, 0, nullptr,
+               graph.ids.data(), graph.dists.data(), graph.flags.data(),
+               d_labels.data(), d_vectors, main_label, n, ku, dmu);
     GPU_SYNC();
 }
 

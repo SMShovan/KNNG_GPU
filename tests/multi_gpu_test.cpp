@@ -18,6 +18,7 @@ using knng::gpu::PeerLinkType;
 using knng::gpu::MultiGpuConfig;
 using knng::gpu::partition_points;
 using knng::gpu::cpu_multi_brute_force_point;
+using knng::gpu::cpu_multi_brute_force_tile;
 
 // ===========================================================================
 // Step 80 — CPU collective simulation
@@ -150,6 +151,50 @@ TEST(MultiGpu, PointSharded_MatchesSingleGpu_SmallDataset) {
             EXPECT_NE(static_cast<std::size_t>(id), i);
             EXPECT_GE(result.distances[i*k+r], 0.f);
         }
+}
+
+// ===========================================================================
+// Step 83 — Tile-sharded multi-GPU brute-force
+// ===========================================================================
+
+TEST(MultiGpu, TileSharded_ProducesValidGraph) {
+    const std::size_t n = 8, d = 2, k = 2;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d; ds.data.resize(n * d);
+    for (std::size_t i = 0; i < n; ++i) {
+        ds.data[i*d+0] = static_cast<float>(i);
+        ds.data[i*d+1] = 0.f;
+    }
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 4; cfg.k = static_cast<int>(k);
+    const auto result = cpu_multi_brute_force_tile(ds, cfg);
+    ASSERT_EQ(result.n, n);
+    ASSERT_EQ(result.k, k);
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t r = 0; r < k; ++r) {
+            const auto id = result.neighbors[i*k+r];
+            EXPECT_LT(static_cast<std::size_t>(id), n);
+            EXPECT_GE(result.distances[i*k+r], 0.f);
+        }
+}
+
+TEST(MultiGpu, TileSharded_MatchesPointSharded) {
+    // Both strategies should find the same k=1 nearest neighbor
+    const std::size_t n = 6, d = 2;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d; ds.data.resize(n * d);
+    for (std::size_t i = 0; i < n; ++i) {
+        ds.data[i*d+0] = static_cast<float>(i * 10);
+        ds.data[i*d+1] = 0.f;
+    }
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 2; cfg.k = 1;
+
+    const auto rp = cpu_multi_brute_force_point(ds, cfg);
+    const auto rt = cpu_multi_brute_force_tile(ds, cfg);
+
+    for (std::size_t i = 0; i < n; ++i)
+        EXPECT_EQ(rp.neighbors[i], rt.neighbors[i]);
 }
 
 TEST(NcclComm, CpuSim_ReduceScatter_FourRanks) {

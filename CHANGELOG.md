@@ -12,6 +12,45 @@ independent of the code diff.
 
 ---
 
+## [Step 83] — Tile-sharded multi-GPU brute-force (2026-05-13)
+
+### What
+- **CPU reference** (`src/gpu/multi_gpu_cpu_ref.cpp`):
+  `cpu_multi_brute_force_tile` — 2-D tile partition: queries split into
+  `sqrt(n_gpus)` rows of tiles, references into `sqrt(n_gpus)` column tiles.
+  Each virtual rank owns one `(q_tile, r_tile)` block of the n×n distance
+  matrix; partial top-k results are merged locally after all tiles complete.
+  Simulates the AllToAll gather of partial results.
+- **Tests**: `TileSharded_ProducesValidGraph`,
+  `TileSharded_MatchesPointSharded` (2 new tests, 15 total).
+
+### Why
+For SIFT-1M with 8 GPUs, point-sharding still requires each GPU to store the
+full 512 MB reference set.  Tile-sharding reduces per-GPU memory to
+O(n/sqrt(P) × d) = O(181 MB) in this example — a 2.8× reduction.  The cost
+is AllToAll communication of partial distance rows (instead of just a single
+bcast), but this is an acceptable trade for hardware that cannot hold the full
+dataset.
+
+### Tradeoff
+The CPU reference uses `max_heap` over the full (q_tile × n) partial distance
+values for each query.  On GPU the correct implementation uses a merge-sort or
+Bitonic sort of the partial top-k lists across ranks (O(k log k) per query,
+O(n log k) total).  The CPU reference avoids this complexity by computing
+the full top-k directly from the accumulated distance.
+
+### Learning
+2-D tile partitioning is the same decomposition used in GEMM tiling (Phase 8,
+Step 53).  The intuition is identical: expose more data reuse within each
+tile; pay latency once per tile boundary rather than per element.  The
+difference here is that "reuse" is in the top-k selection logic, not in
+SMEM tiling.
+
+### Next
+Step 84: stream overlap — compute + communication pipeline.
+
+---
+
 ## [Step 82] — Point-sharded multi-GPU brute-force (2026-05-13)
 
 ### What

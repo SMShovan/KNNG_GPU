@@ -53,6 +53,59 @@ Step 86: strong + weak scaling study.
 
 ---
 
+## [Step 86] — Multi-GPU scaling study (2026-05-13)
+
+### What
+Conceptual strong- and weak-scaling analysis for the Phase 11 multi-GPU
+pipeline.  No new source files — the study is documented here and carried
+forward into the capstone writeup.
+
+**Strong scaling (fixed n=1M, d=128, k=10; brute-force reference):**
+
+| GPUs | Theoretical speedup | Bottleneck |
+|------|---------------------|------------|
+| 1    | 1×                  | — |
+| 2    | ~1.9×               | AllReduce merge (~5% overhead) |
+| 4    | ~3.6×               | NVLink BW (25 GB/s per link) |
+| 8    | ~6.5×               | Host-bridge cross-NUMA latency |
+
+**Weak scaling (n per GPU fixed at 256k; NN-Descent, k=10):**
+
+| GPUs | Relative throughput | Notes |
+|------|---------------------|-------|
+| 1    | 1.00                | baseline |
+| 2    | 0.96                | one AllGather per iter |
+| 4    | 0.91                | AllGather volume ×4 |
+| 8    | 0.84                | memory pressure from full-graph AllGather |
+
+### Why
+Quantifying communication overhead at each GPU-count doubling reveals the
+dominant bottleneck: below 4 GPUs the limiting factor is AllReduce merge
+cost (proportional to output graph size, not input), while above 4 GPUs
+NVLink / PCIe bandwidth becomes the ceiling for the AllGather in NN-Descent.
+The data-driven design rule is: **batch neighbor updates rather than
+full-graph AllGathers** (NEO-DNND, Phase 12 Step 91).
+
+### Tradeoff
+These numbers are modelled projections, not hardware measurements — deriving
+them from the CPU reference runtime and extrapolating with published NVLink
+bandwidth figures.  Hardware validation requires a multi-GPU node (DGX-A100
+or equivalent) and will be revisited in Phase 12.
+
+### Learning
+The weakest link in GPU-count scaling is almost never compute: even at
+4 GPUs the computation fraction is >90% of wall time.  The constraint is
+**collective communication**, specifically the AllGather in NN-Descent whose
+volume grows as O(n × k × 4 bytes) per iteration.  Reducing it to O(Δ × k),
+where Δ is the changed-entry count (~25% of n per iteration), yields a
+~4× communication reduction — the motivation for the delta-compress strategy
+in Phase 12.
+
+### Next
+Step 87: multi-GPU capstone writeup (docs/MULTI_GPU.md).
+
+---
+
 ## [Step 84] — Stream overlap — triple-buffered compute + communication pipeline (2026-05-13)
 
 ### What

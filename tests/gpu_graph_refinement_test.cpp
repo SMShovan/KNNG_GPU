@@ -17,6 +17,7 @@ using knng::gpu::CpuDeviceGraph;
 using knng::gpu::cpu_enforce_out_degree;
 using knng::gpu::cpu_rank_reorder;
 using knng::gpu::cpu_add_reverse_edges;
+using knng::gpu::cpu_prune_detour_edges;
 using knng::gpu::kSentinelDist;
 
 static CpuDeviceGraph make_graph(std::size_t n, std::size_t k,
@@ -175,6 +176,62 @@ TEST(GraphRefinement, AddReverseEdges_EvictsWorstEntry) {
     // 1's slot should now be 0 (dist 2.0 replaced dist 10.0)
     EXPECT_EQ(g.ids[1], 0u);
     EXPECT_FLOAT_EQ(g.dists[1], 2.f);
+}
+
+// ===========================================================================
+// Step 75 — Detourable-edge pruning
+// ===========================================================================
+
+// 3 collinear points: A=(0,0), B=(1,0), C=(4,0).
+// B→C: d(B,C)²=9.  d(B,A)²=1 < 9, d(A,C)²=16 > 9 — A does NOT provide detour.
+// So B→C should be KEPT.
+TEST(GraphRefinement, PruneDetour_KeepsNecessaryEdge) {
+    // 3 points: A=0=(0,0), B=1=(1,0), C=2=(4,0)
+    // Point 1 (B) has neighbors: A (dist²=1), C (dist²=9)
+    std::vector<float> vecs = {0.f, 0.f,  1.f, 0.f,  4.f, 0.f};
+    CpuDeviceGraph g(3, 2);
+    g.ids   = {1u, 2u,   // row 0 (A): not tested
+               0u, 2u,   // row 1 (B): A at dist²=1, C at dist²=9
+               0u, 1u};  // row 2 (C): not tested
+    g.dists = {1.f, 16.f,
+               1.f, 9.f,
+               16.f, 9.f};
+    cpu_prune_detour_edges(g, vecs.data(), 2);
+    // B→C must NOT be pruned: A is closer to B but d(A,C)=16 > 9
+    EXPECT_EQ(g.ids[1*2+1], 2u);
+}
+
+// 3 collinear points: A=(0,0), B=(0,0)+eps (approx same), C=(4,0).
+// Use: A=(0,0), B=(0,0), mediant M=(1,0).
+// B→C: d²=16. Neighbor M: d(B,M)²=1<16, d(M,C)²=9<16 → M provides detour.
+// So B→C should be PRUNED.
+TEST(GraphRefinement, PruneDetour_RemovesDetourableEdge) {
+    // Point 0=B=(0,0), Point 1=M=(1,0), Point 2=C=(4,0)
+    std::vector<float> vecs = {0.f, 0.f,  1.f, 0.f,  4.f, 0.f};
+    CpuDeviceGraph g(3, 2);
+    g.ids   = {1u, 2u,   // row 0 (B): M at d²=1, C at d²=16
+               0u, 2u,   // row 1 (M): not tested
+               1u, 0u};  // row 2 (C): not tested
+    g.dists = {1.f, 16.f,
+               1.f, 9.f,
+               9.f, 16.f};
+    const auto S = static_cast<knng::index_t>(-1);
+    cpu_prune_detour_edges(g, vecs.data(), 2);
+    // B→C (row 0, slot 1) must be pruned
+    EXPECT_EQ(g.ids[0*2+1], S);
+    // B→M (row 0, slot 0) must be kept (M is closer than C; no detour via C)
+    EXPECT_EQ(g.ids[0*2+0], 1u);
+}
+
+TEST(GraphRefinement, PruneDetour_AllSentinels_NoChange) {
+    const auto S = static_cast<knng::index_t>(-1);
+    CpuDeviceGraph g(2, 2);
+    g.ids   = {S, S, S, S};
+    g.dists = {kSentinelDist, kSentinelDist, kSentinelDist, kSentinelDist};
+    std::vector<float> vecs = {0.f, 0.f, 1.f, 0.f};
+    cpu_prune_detour_edges(g, vecs.data(), 2);
+    EXPECT_EQ(g.ids[0], S);
+    EXPECT_EQ(g.ids[1], S);
 }
 
 // ===========================================================================

@@ -5,6 +5,7 @@
 ///   Step 72: `enforce_out_degree_kernel`  — insertion-sort rows in shared mem
 ///   Step 73: `build_ranks_kernel`, `rank_sort_kernel`
 ///   Step 74: `add_reverse_edges_kernel`
+///   Step 75: `prune_detour_kernel`
 
 #include <knng/gpu/graph_refinement.hpp>
 #include <knng/gpu/device_graph.hpp>
@@ -267,6 +268,68 @@ void gpu_add_reverse_edges(DeviceGraph& graph) {
     const unsigned int blocks  = (n + threads - 1u) / threads;
     GPU_LAUNCH(add_reverse_edges_kernel, blocks, threads, 0, nullptr,
                graph.ids.data(), graph.dists.data(), graph.flags.data(), n, ku);
+    GPU_SYNC();
+}
+
+// ===========================================================================
+// Step 75 — Detourable-edge pruning kernel (MRNG rule)
+// ===========================================================================
+
+GPU_GLOBAL void prune_detour_kernel(
+    knng::index_t* d_ids,
+    float*         d_dists,
+    std::uint32_t* d_flags,
+    const float*   d_vectors,
+    unsigned int   n,
+    unsigned int   k,
+    unsigned int   dim)
+{
+    const unsigned int i = blockIdx.x;
+    if (i >= n) return;
+
+    const auto kSentinel  = static_cast<knng::index_t>(-1);
+    const float kSentDist = 3.402823466e+38f;
+
+    // Each thread handles one candidate edge i → j
+    for (unsigned int r = threadIdx.x; r < k; r += blockDim.x) {
+        const knng::index_t j = d_ids[i * k + r];
+        if (j == kSentinel) continue;
+        const float dij = d_dists[i * k + r];
+        const float* vj = d_vectors + static_cast<std::size_t>(j) * dim;
+
+        bool detourable = false;
+        for (unsigned int s = 0; s < k && !detourable; ++s) {
+            if (s == r) continue;
+            const knng::index_t m = d_ids[i * k + s];
+            if (m == kSentinel) continue;
+            const float dim2 = d_dists[i * k + s];
+            if (dim2 >= dij) continue;
+            const float* vm = d_vectors + static_cast<std::size_t>(m) * dim;
+            float dmj = 0.f;
+            for (unsigned int dd = 0; dd < dim; ++dd) {
+                const float diff = vm[dd] - vj[dd];
+                dmj += diff * diff;
+            }
+            if (dmj < dij) detourable = true;
+        }
+
+        if (detourable) {
+            d_ids  [i * k + r] = kSentinel;
+            d_dists[i * k + r] = kSentDist;
+            d_flags[i * k + r] = 0u;
+        }
+    }
+}
+
+void gpu_prune_detour_edges(DeviceGraph& graph,
+                             const float* d_vectors,
+                             std::size_t dim) {
+    const auto n   = static_cast<unsigned int>(graph.n);
+    const auto ku  = static_cast<unsigned int>(graph.k);
+    const auto dmu = static_cast<unsigned int>(dim);
+    GPU_LAUNCH(prune_detour_kernel, n, 32u, 0, nullptr,
+               graph.ids.data(), graph.dists.data(), graph.flags.data(),
+               d_vectors, n, ku, dmu);
     GPU_SYNC();
 }
 

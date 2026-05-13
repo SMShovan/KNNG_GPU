@@ -12,6 +12,50 @@ independent of the code diff.
 
 ---
 
+## [Step 75] — Detourable-edge pruning — MRNG rule (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: adds `cpu_prune_detour_edges` /
+  `gpu_prune_detour_edges` declarations (take raw float* vectors and dim).
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_prune_detour_edges` — for each edge i → j (dist² = dij), scans i's
+  other neighbors m: if d(i,m)² < dij and d(m,j)² < dij (computed via
+  `sq_l2`), then m provides a detour and j is replaced with a sentinel.
+- **GPU kernel** (`src/gpu/graph_refinement.cu`):
+  `prune_detour_kernel` — one block per point i (32 threads, warp-aligned),
+  each thread handles one edge r via a striped loop; inner loop walks all
+  other neighbors m in global memory; detourable edges marked as sentinels.
+- **Tests**: `PruneDetour_KeepsNecessaryEdge`,
+  `PruneDetour_RemovesDetourableEdge`, `PruneDetour_AllSentinels_NoChange`
+  (3 new tests, 13 total).
+
+### Why
+Long-range direct edges that can be reached more efficiently via an
+intermediate neighbor waste the out-degree budget.  Replacing them with
+sentinels frees slots for shorter, more useful edges (added in Step 74) and
+makes the graph sparser without disconnecting it — the detour path i→m→j
+still exists.  The MRNG rule (Ootomo et al., IPDPS 2023) formalises this:
+an edge is detourable iff d(i,m) < d(i,j) ∧ d(m,j) < d(i,j) for some
+neighbor m.
+
+### Tradeoff
+O(k²) neighbor-pair comparisons per point, each requiring a full d(m,j)
+distance computation (O(dim)).  Total: O(n · k² · dim).  For k=64, dim=128,
+n=10⁶ this is ~500 billion FMAs — too slow for a single pass in production.
+CAGRA prunes only after multiple NN-Descent iterations and uses tighter
+candidate sets.  Here we accept the cost for correctness validation.
+
+### Learning
+Symmetry matters: d(i,m) < d(i,j) ensures m is on the way to j, and
+d(m,j) < d(i,j) ensures m actually reaches j more efficiently.  Both
+conditions together are necessary — without the second condition, any
+neighbor closer than j would trigger pruning (even one pointing away from j).
+
+### Next
+Step 76: strong-component merging.
+
+---
+
 ## [Step 74] — Add reverse edges (2026-05-13)
 
 ### What

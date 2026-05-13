@@ -87,4 +87,31 @@ void cpu_add_reverse_edges(CpuDeviceGraph& graph);
 void gpu_add_reverse_edges(DeviceGraph& graph);
 #endif
 
+// ---------------------------------------------------------------------------
+// Step 75 — Detourable-edge pruning (MRNG rule)
+// ---------------------------------------------------------------------------
+
+/// @brief Remove edge i → j if there exists another neighbor m of i such that
+/// d(i,m) < d(i,j) and d(m,j) < d(i,j) — i.e., the path i→m→j is a detour
+/// that makes the direct edge redundant.
+///
+/// This is the Monotonic Relative Neighborhood Graph (MRNG) pruning rule
+/// described in the CAGRA paper (Ootomo et al., IPDPS 2023).  Pruned slots
+/// are replaced with sentinels.
+///
+/// @param graph    In/out SoA graph (mutated in place).
+/// @param vectors  Row-major float matrix, shape [n × dim], used to compute
+///                 d(m, j) between neighbors.
+/// @param dim      Feature dimension.
+void cpu_prune_detour_edges(CpuDeviceGraph& graph,
+                             const float* vectors,
+                             std::size_t dim);
+
+#if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
+/// @brief GPU: mark detourable edges as sentinels (one block per point).
+void gpu_prune_detour_edges(DeviceGraph& graph,
+                             const float* d_vectors,
+                             std::size_t dim);
+#endif
+
 } // namespace knng::gpu

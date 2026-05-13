@@ -159,4 +159,53 @@ void cpu_add_reverse_edges(CpuDeviceGraph& graph) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step 75 — Detourable-edge pruning, MRNG rule (CPU reference)
+// ---------------------------------------------------------------------------
+
+namespace {
+inline float sq_l2(const float* a, const float* b, std::size_t dim) {
+    float s = 0.f;
+    for (std::size_t d = 0; d < dim; ++d) { const float diff = a[d] - b[d]; s += diff * diff; }
+    return s;
+}
+} // anonymous namespace
+
+void cpu_prune_detour_edges(CpuDeviceGraph& graph,
+                             const float* vectors,
+                             std::size_t dim) {
+    const std::size_t n = graph.n;
+    const std::size_t k = graph.k;
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+
+    for (std::size_t i = 0; i < n; ++i) {
+        (void)(vectors + i * dim); // vi not needed: dij already in graph.dists
+        for (std::size_t r = 0; r < k; ++r) {
+            const knng::index_t j = graph.ids[i * k + r];
+            if (j == kSentinel) continue;
+            const float dij = graph.dists[i * k + r]; // d(i,j)²
+            const float* vj = vectors + static_cast<std::size_t>(j) * dim;
+
+            // Check if any other neighbor m provides a detour
+            bool detourable = false;
+            for (std::size_t s = 0; s < k && !detourable; ++s) {
+                if (s == r) continue;
+                const knng::index_t m = graph.ids[i * k + s];
+                if (m == kSentinel) continue;
+                const float dim2 = graph.dists[i * k + s]; // d(i,m)²
+                if (dim2 >= dij) continue;                  // m is not closer than j
+                const float* vm = vectors + static_cast<std::size_t>(m) * dim;
+                const float dmj = sq_l2(vm, vj, dim);       // d(m,j)²
+                if (dmj < dij) detourable = true;
+            }
+
+            if (detourable) {
+                graph.ids  [i * k + r] = kSentinel;
+                graph.dists[i * k + r] = kSentinelDist;
+                graph.flags[i * k + r] = 0u;
+            }
+        }
+    }
+}
+
 } // namespace knng::gpu

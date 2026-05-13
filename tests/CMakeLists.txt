@@ -258,6 +258,18 @@ set_target_properties(test_gpu_neighbor_list PROPERTIES OUTPUT_NAME "test_gpu_ne
 gtest_discover_tests(test_gpu_neighbor_list
     PROPERTIES LABELS "gpu;nnd;neighbor_list" DISCOVERY_TIMEOUT 10)
 
+# `test_gpu_graph_refinement` — Steps 72–77 (plan Steps 71–76): CAGRA-style refinement.
+add_executable(test_gpu_graph_refinement gpu_graph_refinement_test.cpp)
+target_link_libraries(test_gpu_graph_refinement
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_gpu_graph_refinement PRIVATE knng::gpu CUDA::cudart CUDA::cublas)
+endif()
+knng_set_warnings(test_gpu_graph_refinement)
+set_target_properties(test_gpu_graph_refinement PROPERTIES OUTPUT_NAME "test_gpu_graph_refinement")
+gtest_discover_tests(test_gpu_graph_refinement
+    PROPERTIES LABELS "gpu;cagra;refinement" DISCOVERY_TIMEOUT 10)
+
 # `test_gpu_nnd_reverse_sampling` — Steps 66-67 & 69: reverse graph, sampling, fp16.
 add_executable(test_gpu_nnd_reverse_sampling gpu_nnd_reverse_sampling_test.cpp)
 target_link_libraries(test_gpu_nnd_reverse_sampling

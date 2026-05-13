@@ -12,6 +12,54 @@ independent of the code diff.
 
 ---
 
+## [Step 72] — Fixed out-degree enforcement (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: Phase 10 public API header.
+  Declares `GraphRefinementConfig` struct and all CPU/GPU function prototypes
+  for Steps 72–77.  GPU declarations guarded by `KNNG_HAVE_CUDA/HIP`.
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_enforce_out_degree` — for each row, indirect-sorts the k entries by
+  distance ascending (valid entries first, sentinels last) via `std::sort`
+  with an index permutation; applies the permutation in-place.
+- **GPU kernel** (`src/gpu/graph_refinement.cu`):
+  `enforce_out_degree_kernel` — one block per point; loads k (id, dist, flag)
+  triples into shared memory; single-thread insertion sort (valid first,
+  sentinels last, distance-ascending within valid entries); writes back.
+  `gpu_enforce_out_degree` host wrapper computes shmem = k × 12 bytes and
+  launches one block per row.
+- **Tests** (`tests/gpu_graph_refinement_test.cpp`):
+  `EnforceOutDegree_SortsByDistanceAscending`, `EnforceOutDegree_SentinelsLast`,
+  `EnforceOutDegree_AlreadySorted_NoChange`, `EnforceOutDegree_MultipleRows`
+  (4 tests, all CPU-path).
+- `src/CMakeLists.txt`: adds `graph_refinement_cpu_ref.cpp` to `knng_gpu_ref`.
+- `src/gpu/CMakeLists.txt`: adds `graph_refinement.cu` to `knng_gpu`.
+- `tests/CMakeLists.txt`: adds `test_gpu_graph_refinement` target.
+
+### Why
+After NN-Descent's atomic insertions, each row may be in arbitrary order.
+Steps 73–76 all assume sorted rows (position 0 = closest neighbor).
+Establishing this invariant here prevents every subsequent step from
+needing to re-sort, and aligns with CAGRA's graph post-processing pipeline.
+
+### Tradeoff
+Insertion sort in a single thread is O(k²) per node.  For k ≤ 64 and n =
+SIFT-1M this is 64² × 10⁶ = 4 × 10⁹ comparisons — slower than a radix sort
+but simpler and with zero extra global memory.  A production implementation
+would use bitonic sort (branch-free, warp-parallel), but insertion sort in
+shared memory is sufficient for correctness validation.
+
+### Learning
+Single-thread sort inside a GPU kernel wastes parallelism but gives the
+clearest baseline.  The correct optimization path is: prove correctness with
+insertion sort → replace with bitonic sort → measure occupancy improvement.
+This is the same ladder we climbed in Phase 8 for top-k (Steps 54–55).
+
+### Next
+Step 73: rank-based reordering.
+
+---
+
 ## [Phase 9 audit fixes] — Missing steps completed (2026-05-12)
 
 ### What
@@ -6756,5 +6804,3 @@ breakage would be invisible until Step 6 or later.
 ### Next
 Step 2 will wire GoogleTest via `FetchContent` and add a `tests/` directory
 with a smoke-test, confirming that `ctest` runs cleanly in-tree and in CI.
-
----

@@ -21,6 +21,7 @@ set(_knng_gpu_sources
     wmma_distance.cu        # Step 58: Tensor Core (WMMA) GEMM (CC≥70)
     streamed_brute_force.cu # Step 59: stream-pipelined BF KNN
     gpu_nn_descent.cu       # Steps 63-70: GPU NN-Descent kernels
+    graph_refinement.cu     # Steps 72-77: CAGRA-style graph refinement
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

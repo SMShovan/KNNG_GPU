@@ -505,6 +505,22 @@ gtest_discover_tests(test_gpu_backend
     DISCOVERY_TIMEOUT 10
 )
 
+# `test_multi_gpu` — Steps 80–87: multi-GPU single-node (NCCL, topology, partitioning).
+# Always built; GPU+NCCL tests guarded at runtime.
+add_executable(test_multi_gpu multi_gpu_test.cpp)
+target_link_libraries(test_multi_gpu
+    PRIVATE knng::gpu_ref GTest::gtest_main)
+if(KNNG_HAVE_CUDA)
+    target_link_libraries(test_multi_gpu PRIVATE knng::gpu CUDA::cudart)
+    if(KNNG_HAVE_NCCL)
+        target_link_libraries(test_multi_gpu PRIVATE knng::nccl_iface)
+    endif()
+endif()
+knng_set_warnings(test_multi_gpu)
+set_target_properties(test_multi_gpu PROPERTIES OUTPUT_NAME "test_multi_gpu")
+gtest_discover_tests(test_multi_gpu
+    PROPERTIES LABELS "gpu;multi_gpu;nccl" DISCOVERY_TIMEOUT 10)
+
 if(KNNG_HAVE_MPI)
     find_program(MPIRUN_EXEC
         NAMES mpirun mpiexec

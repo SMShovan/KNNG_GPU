@@ -22,6 +22,7 @@ set(_knng_gpu_sources
     streamed_brute_force.cu # Step 59: stream-pipelined BF KNN
     gpu_nn_descent.cu       # Steps 63-70: GPU NN-Descent kernels
     graph_refinement.cu     # Steps 72-77: CAGRA-style graph refinement
+    nccl_comm.cu            # Step 80: NcclComm RAII wrapper (NCCL-gated)
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})

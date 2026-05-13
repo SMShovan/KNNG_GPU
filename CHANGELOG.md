@@ -12,6 +12,97 @@ independent of the code diff.
 
 ---
 
+## [Step 81] — Device discovery + P2P topology probe (2026-05-13)
+
+### What
+- **`include/knng/gpu/topology.hpp`**: `PeerLinkType` enum (Same / NVLink /
+  PCIe / HostBridge / Simulated); `Topology` class with `simulate(n_gpus)`
+  (always compiled) and `probe()` (CUDA-gated).
+- **CPU reference** (`src/gpu/topology.cpp`): `Topology::simulate` fills an
+  n × n matrix — diagonal = `Same`, off-diagonal = `Simulated`.
+  `peer_link_type_name` for logging; `to_string` for human-readable tables.
+- **Tests**: `Topology_Simulate_DiagonalIsSame`,
+  `Topology_Simulate_OffDiagonalIsSimulated`, `Topology_Simulate_NoP2P`,
+  `Topology_ToStringContainsGpuCount` (4 new tests, 14 total).
+
+### Why
+Multi-GPU algorithms need to know the communication bandwidth between each
+pair of devices before choosing whether to use NCCL AllReduce, direct P2P
+memcpy, or host-staged copies.  The `Topology` struct is the single place
+that encodes this — every higher-level kernel consults it rather than
+re-probing the hardware.  The CPU simulation path makes topology-aware
+scheduling logic testable without any GPU hardware.
+
+### Tradeoff
+`Topology::probe()` (CUDA path, Step 81 extension) uses
+`cudaDeviceCanAccessPeer()` to detect PCIe P2P but cannot distinguish NVLink
+from PCIe without NVML.  Reporting PCIe for all P2P-capable pairs is
+conservative — it over-estimates latency but never under-estimates it.
+NVLink detection via `nvmlDeviceGetNvLinkState` can be added in Phase 13
+(production polish) when NVML becomes a documented dependency.
+
+### Learning
+Separating topology discovery from communication is the key pattern in cuVS,
+NCCL, and RAFT.  Every collective decision (broadcast vs ring reduce vs tree
+reduce) depends on the bandwidth matrix, not on the algorithm.  Encoding the
+topology explicitly prevents the scatter of `cudaDeviceCanAccessPeer` checks
+throughout the algorithm code.
+
+### Next
+Step 82: point-sharded multi-GPU brute-force.
+
+---
+
+## [Step 80] — NCCL integration + CPU collective simulation (2026-05-13)
+
+### What
+- **`cmake/FindKnngNCCL.cmake`**: optional NCCL discovery following the same
+  pattern as `FindKnngMPI.cmake`.  Sets `KNNG_HAVE_NCCL` and exports
+  `knng::nccl_iface`.  Skipped silently when NCCL is not found.
+- **`CMakeLists.txt`**: adds `include(FindKnngNCCL)`.
+- **`include/knng/gpu/nccl_comm.hpp`**: `CpuSimCollective` (always compiled)
+  with `allreduce_sum`, `bcast`, `allgather`, `reduce_scatter` operating on
+  `std::vector<std::vector<float>>` rank arrays.  `NcclComm` RAII class
+  gated on `KNNG_HAVE_CUDA && KNNG_HAVE_NCCL`.
+- **CPU reference** (`src/gpu/nccl_comm_cpu_ref.cpp`): element-wise
+  implementations of all four collectives.
+- **GPU stub** (`src/gpu/nccl_comm.cu`): `NcclComm::init_all`,
+  `allreduce_sum`, `bcast`, `allgather` via `ncclCommInitAll`, `ncclAllReduce`,
+  `ncclBcast`, `ncclAllGather`.
+- **Tests** (`tests/multi_gpu_test.cpp`):
+  `CpuSim_AllreduceSum_TwoRanks`, `CpuSim_AllreduceSum_FourRanks`,
+  `CpuSim_Bcast_RootZero`, `CpuSim_Bcast_RootNonZero`,
+  `CpuSim_Allgather_TwoRanks`, `CpuSim_ReduceScatter_FourRanks`
+  (6 new tests, 10 total in `test_multi_gpu`).
+- `src/CMakeLists.txt`, `src/gpu/CMakeLists.txt`, `tests/CMakeLists.txt`: wired up.
+
+### Why
+NCCL is the only production-grade collective library for NVIDIA GPUs and is
+the communication backbone of cuVS, RAPIDS, and PyTorch distributed.
+Gating it behind `find_package(NCCL QUIET)` ensures the project builds and
+tests on Mac without any NCCL installation, while the real path is available
+immediately when the user pushes to a multi-GPU node.  The `CpuSimCollective`
+is not a performance approximation — it exists purely so the multi-GPU
+algorithm logic (partitioning, merge, allgather patterns) can be unit-tested
+without hardware.
+
+### Tradeoff
+`CpuSimCollective` has O(n_ranks × count) cost and holds all data in-process,
+so it cannot simulate inter-node latency or bandwidth limits.  It is a
+correctness tool only: if the algorithm produces the right graph using the
+CPU sim, the same algorithm with real NCCL will produce the same graph faster.
+
+### Learning
+The NCCL API design (all ranks call the same function with their local buffer;
+the library handles routing) mirrors the MPI collective API but is stream-aware.
+`CpuSimCollective` exposes this pattern using `vector<vector<float>>` rather
+than streams, making the calling convention identical at the C++ level.
+
+### Next
+Step 81: device discovery + P2P topology probe.
+
+---
+
 ## [Step 79] — Phase 10 capstone writeup (2026-05-13)
 
 ### What

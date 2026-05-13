@@ -82,6 +82,9 @@ add_library(knng_gpu_ref STATIC
     gpu/device_graph.cpp                 # Step 62
     gpu/gpu_nn_descent_cpu_ref.cpp       # Steps 63-70: GPU NND CPU references
     gpu/graph_refinement_cpu_ref.cpp    # Steps 72-77: CAGRA-style refinement CPU refs
+    gpu/topology.cpp                    # Step 81: P2P topology simulation
+    gpu/nccl_comm_cpu_ref.cpp           # Step 80: NCCL collective CPU simulation
+    gpu/multi_gpu_cpu_ref.cpp           # Steps 82-85: multi-GPU algorithm CPU refs
 )
 target_link_libraries(knng_gpu_ref PUBLIC knng::core)
 knng_set_warnings(knng_gpu_ref)

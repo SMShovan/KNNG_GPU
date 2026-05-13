@@ -64,6 +64,7 @@ endif()
 
 include(FindKnngCUDA)
 include(FindKnngHIP)
+include(FindKnngNCCL)
 
 # Generate include/knng/version.hpp from the template.
 configure_file(

@@ -108,4 +108,55 @@ void cpu_rank_reorder(CpuDeviceGraph& graph) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step 74 — Add reverse edges (CPU reference)
+// ---------------------------------------------------------------------------
+
+void cpu_add_reverse_edges(CpuDeviceGraph& graph) {
+    const std::size_t n = graph.n;
+    const std::size_t k = graph.k;
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+
+    // For each edge i → j, try to insert (j → i, dist) into j's list.
+    // Replace a sentinel slot if available; otherwise replace the worst valid
+    // entry if dist is better.
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t r = 0; r < k; ++r) {
+            const knng::index_t j = graph.ids[i * k + r];
+            if (j == kSentinel) break;
+            const float dist = graph.dists[i * k + r];
+
+            // Check if i is already in j's list
+            bool already_present = false;
+            std::size_t sentinel_slot = k;      // first sentinel slot in j's list
+            std::size_t worst_slot    = k;      // slot with largest distance in j's list
+            float       worst_dist    = -1.f;
+
+            for (std::size_t s = 0; s < k; ++s) {
+                const knng::index_t jid = graph.ids[j * k + s];
+                if (jid == static_cast<knng::index_t>(i)) { already_present = true; break; }
+                if (jid == kSentinel) {
+                    if (sentinel_slot == k) sentinel_slot = s;
+                } else if (graph.dists[j * k + s] > worst_dist) {
+                    worst_dist = graph.dists[j * k + s];
+                    worst_slot = s;
+                }
+            }
+            if (already_present) continue;
+
+            if (sentinel_slot != k) {
+                // Fill a sentinel slot
+                graph.ids  [j * k + sentinel_slot] = static_cast<knng::index_t>(i);
+                graph.dists[j * k + sentinel_slot] = dist;
+                graph.flags[j * k + sentinel_slot] = 0u;
+            } else if (worst_slot != k && dist < worst_dist) {
+                // Evict worst entry
+                graph.ids  [j * k + worst_slot] = static_cast<knng::index_t>(i);
+                graph.dists[j * k + worst_slot] = dist;
+                graph.flags[j * k + worst_slot] = 0u;
+            }
+        }
+    }
+}
+
 } // namespace knng::gpu

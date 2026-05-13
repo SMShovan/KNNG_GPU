@@ -12,6 +12,49 @@ independent of the code diff.
 
 ---
 
+## [Step 74] — Add reverse edges (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: adds `cpu_add_reverse_edges` /
+  `gpu_add_reverse_edges` declarations.
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_add_reverse_edges` — for every directed edge i → j (dist d), attempts
+  to insert the reverse edge j → i (dist d) into j's k-neighbor list.
+  Prefers filling sentinel (empty) slots; if the list is full, evicts the
+  current worst entry if d is strictly smaller.
+- **GPU kernel** (`src/gpu/graph_refinement.cu`):
+  `add_reverse_edges_kernel` — one thread per node i; for each of i's valid
+  neighbors j, scans j's list and uses `atomicCAS` on the id slot to
+  claim a sentinel or an eviction target.
+- **Tests**: `AddReverseEdges_AlreadyPresent_NoChange`,
+  `AddReverseEdges_FillsSentinelSlot`, `AddReverseEdges_EvictsWorstEntry`
+  (3 new tests, 10 total).
+
+### Why
+NN-Descent produces a directed graph: if i → j exists, j → i may not.
+Asymmetric graphs hurt beam-search because traversal can get trapped in
+sub-graphs that are only reachable in one direction.  Adding reverse edges
+makes the graph more symmetric, improving recall without increasing the
+out-degree cap k.
+
+### Tradeoff
+The atomic CAS approach for GPU is a best-effort scatter: under concurrent
+writes for the same j-slot, only one writer wins.  Some reverse edges are
+lost, but the graph remains valid and the lost edges are statistically the
+lower-priority ones (they lose the race because others also competed for the
+same target).  A fully deterministic approach would require a global sort of
+all (j, dist) pairs, which is O(n·k log(n·k)) in device memory.
+
+### Learning
+The sentinel-first, then evict-worst strategy matches the NN-Descent
+update rule used in Phase 9.  Re-using the same atomic pattern keeps the
+mental model consistent and avoids introducing new locking primitives.
+
+### Next
+Step 75: detourable-edge pruning (MRNG rule).
+
+---
+
 ## [Step 73] — Rank-based reordering (2026-05-13)
 
 ### What

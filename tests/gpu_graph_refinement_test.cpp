@@ -16,6 +16,7 @@
 using knng::gpu::CpuDeviceGraph;
 using knng::gpu::cpu_enforce_out_degree;
 using knng::gpu::cpu_rank_reorder;
+using knng::gpu::cpu_add_reverse_edges;
 using knng::gpu::kSentinelDist;
 
 static CpuDeviceGraph make_graph(std::size_t n, std::size_t k,
@@ -129,6 +130,51 @@ TEST(GraphRefinement, RankReorder_AllSentinels_NoChange) {
     EXPECT_EQ(g.ids[0], S);
     EXPECT_EQ(g.ids[1], S);
     EXPECT_EQ(g.ids[2], S);
+}
+
+// ===========================================================================
+// Step 74 — Add reverse edges
+// ===========================================================================
+
+// Graph: 0→1 (dist 3), 1→0 (dist 3) already exists — no change expected.
+// After add_reverse_edges, neither list should duplicate entries.
+TEST(GraphRefinement, AddReverseEdges_AlreadyPresent_NoChange) {
+    // 2 points, k=2; fully mutual
+    CpuDeviceGraph g(2, 2);
+    const auto S = static_cast<knng::index_t>(-1);
+    g.ids   = {1u, S,   0u, S};
+    g.dists = {3.f, kSentinelDist, 3.f, kSentinelDist};
+    cpu_add_reverse_edges(g);
+    EXPECT_EQ(g.ids[0], 1u);
+    EXPECT_EQ(g.ids[1], S);
+    EXPECT_EQ(g.ids[2], 0u);
+    EXPECT_EQ(g.ids[3], S);
+}
+
+// Graph: 0→1 (dist 2), 1 has no edge to 0.
+// After add_reverse_edges, 1's list should contain 0 at the sentinel slot.
+TEST(GraphRefinement, AddReverseEdges_FillsSentinelSlot) {
+    CpuDeviceGraph g(2, 2);
+    const auto S = static_cast<knng::index_t>(-1);
+    g.ids   = {1u, S,   S, S};           // 0→1; 1 has no edges
+    g.dists = {2.f, kSentinelDist, kSentinelDist, kSentinelDist};
+    cpu_add_reverse_edges(g);
+    // 1 should now have 0 in its list
+    bool found = (g.ids[2] == 0u || g.ids[3] == 0u);
+    EXPECT_TRUE(found);
+}
+
+// Graph: 0→1 (dist 2.0), 1→2 (dist 10.0, bad), 2 has no edges.
+// Reverse of 0→1 (dist 2.0): should evict 1's entry (2, dist 10.0) since 2.0 < 10.0.
+TEST(GraphRefinement, AddReverseEdges_EvictsWorstEntry) {
+    const auto S = static_cast<knng::index_t>(-1);
+    CpuDeviceGraph g(3, 1);
+    g.ids   = {1u, 2u, S};
+    g.dists = {2.f, 10.f, kSentinelDist};
+    cpu_add_reverse_edges(g);
+    // 1's slot should now be 0 (dist 2.0 replaced dist 10.0)
+    EXPECT_EQ(g.ids[1], 0u);
+    EXPECT_FLOAT_EQ(g.dists[1], 2.f);
 }
 
 // ===========================================================================

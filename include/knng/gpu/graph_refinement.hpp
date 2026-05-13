@@ -67,4 +67,24 @@ void cpu_rank_reorder(CpuDeviceGraph& graph);
 void gpu_rank_reorder(DeviceGraph& graph);
 #endif
 
+// ---------------------------------------------------------------------------
+// Step 74 — Add reverse edges
+// ---------------------------------------------------------------------------
+
+/// @brief For every directed edge i → j, attempt to add the reverse edge j → i
+/// (with the same distance) into j's neighbor list, replacing the worst
+/// current entry if j's list is full.  Sentinels are overwritten first.
+///
+/// A reverse edge improves recall when the original graph is asymmetric:
+/// points that only appear *as* neighbors (but do not *have* i in their own
+/// list) become reachable from both directions.
+///
+/// @param graph  In/out SoA graph (mutated in place).
+void cpu_add_reverse_edges(CpuDeviceGraph& graph);
+
+#if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
+/// @brief GPU: scatter reverse edges using atomic distance comparisons.
+void gpu_add_reverse_edges(DeviceGraph& graph);
+#endif
+
 } // namespace knng::gpu

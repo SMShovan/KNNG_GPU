@@ -3,6 +3,8 @@
 ///
 /// ## Step coverage
 ///   Step 72: `enforce_out_degree_kernel`  — insertion-sort rows in shared mem
+///   Step 73: `build_ranks_kernel`, `rank_sort_kernel`
+///   Step 74: `add_reverse_edges_kernel`
 
 #include <knng/gpu/graph_refinement.hpp>
 #include <knng/gpu/device_graph.hpp>
@@ -198,6 +200,73 @@ void gpu_rank_reorder(DeviceGraph& graph) {
     GPU_LAUNCH(rank_sort_kernel, n, 1u, shmem, nullptr,
                graph.ids.data(), graph.dists.data(), graph.flags.data(),
                d_ranks.data(), n, ku);
+    GPU_SYNC();
+}
+
+// ===========================================================================
+// Step 74 — Add reverse edges kernel
+// ===========================================================================
+
+/// For each edge i → j, atomically scatter the reverse edge (j → i, dist)
+/// into j's neighbor list.  We use atomicMin on d_dists to claim a slot:
+/// each thread walks j's list looking for a sentinel or an entry worse than
+/// dist, then does an atomic CAS on the id slot to claim it.
+GPU_GLOBAL void add_reverse_edges_kernel(
+    knng::index_t* d_ids,
+    float*         d_dists,
+    std::uint32_t* d_flags,
+    unsigned int   n,
+    unsigned int   k)
+{
+    const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    const auto kSentinel = static_cast<knng::index_t>(-1);
+
+    for (unsigned int r = 0; r < k; ++r) {
+        const knng::index_t j = d_ids[i * k + r];
+        if (j == kSentinel) break;
+        const float dist = d_dists[i * k + r];
+        const unsigned int ju = static_cast<unsigned int>(j);
+
+        // Scan j's list for a sentinel or a worse-distance slot
+        for (unsigned int s = 0; s < k; ++s) {
+            const knng::index_t cur = d_ids[ju * k + s];
+            if (cur == static_cast<knng::index_t>(i)) break; // already present
+            if (cur == kSentinel) {
+                // CAS: try to claim this sentinel slot
+                const knng::index_t old = static_cast<knng::index_t>(
+                    atomicCAS(reinterpret_cast<unsigned int*>(&d_ids[ju * k + s]),
+                              static_cast<unsigned int>(kSentinel),
+                              static_cast<unsigned int>(i)));
+                if (old == kSentinel) {
+                    d_dists[ju * k + s] = dist;
+                    d_flags[ju * k + s] = 0u;
+                }
+                break;
+            } else if (d_dists[ju * k + s] > dist) {
+                // Try to evict: CAS on id, then update dist
+                const knng::index_t old = static_cast<knng::index_t>(
+                    atomicCAS(reinterpret_cast<unsigned int*>(&d_ids[ju * k + s]),
+                              static_cast<unsigned int>(cur),
+                              static_cast<unsigned int>(i)));
+                if (old == cur) {
+                    d_dists[ju * k + s] = dist;
+                    d_flags[ju * k + s] = 0u;
+                }
+                break;
+            }
+        }
+    }
+}
+
+void gpu_add_reverse_edges(DeviceGraph& graph) {
+    const auto n  = static_cast<unsigned int>(graph.n);
+    const auto ku = static_cast<unsigned int>(graph.k);
+    const unsigned int threads = 256u;
+    const unsigned int blocks  = (n + threads - 1u) / threads;
+    GPU_LAUNCH(add_reverse_edges_kernel, blocks, threads, 0, nullptr,
+               graph.ids.data(), graph.dists.data(), graph.flags.data(), n, ku);
     GPU_SYNC();
 }
 

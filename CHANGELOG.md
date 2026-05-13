@@ -12,6 +12,43 @@ independent of the code diff.
 
 ---
 
+## [Step 79] — Phase 10 capstone writeup (2026-05-13)
+
+### What
+- **`docs/GRAPH_REFINEMENT.md`**: Phase 10 capstone document.  Covers:
+  - §1 Motivation: why NN-Descent output needs post-processing
+  - §2 Algorithms: per-step description with kernel names, complexity,
+    and the CAGRA paper reference for rank reordering
+  - §3 Ablation study design: expected recall@10 for each config flag combo
+  - §4 Comparison vs cuVS CAGRA: gap table, experimental setup, known gaps
+  - §5 File map
+  - §6 Verification commands (CPU-only ctest, GPU path)
+  - §7 References (Ootomo 2023, Wang 2021, Harwood 2016)
+
+### Why
+Every Phase closes with a document that makes the *why* of each design
+decision legible without reading the full git log.  Phase 10 is particularly
+important because the five refinement steps interact (order matters: pruning
+depends on sorted rows from Step 72; merging depends on reverse edges from
+Step 74) and the ablation config is the primary instrument for tuning.
+
+### Tradeoff
+The ablation numbers in §3 are estimates from the paper; cluster measurements
+will update them.  The cuVS comparison in §4 documents known gaps without
+committing to close them in this Phase — that belongs in Phase 13 (production
+polish).
+
+### Learning
+Writing the gap table (Step 78) before the writeup (Step 79) forced a clear
+separation between "what we implemented" and "what the state of the art does".
+This is the right order: document the gap first so the writeup can frame the
+implementation as a stepping stone rather than a claim of parity.
+
+### Next
+Phase 11: multi-GPU single-node (NCCL, P2P topology, stream overlap).
+
+---
+
 ## [Step 78] — cuVS CAGRA comparison analysis (2026-05-13)
 
 ### What

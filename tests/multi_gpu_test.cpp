@@ -9,6 +9,7 @@
 #include <knng/gpu/nccl_comm.hpp>
 #include <knng/gpu/topology.hpp>
 #include <knng/gpu/multi_gpu.hpp>
+#include <knng/gpu/pipeline.hpp>
 
 #include <vector>
 
@@ -19,6 +20,9 @@ using knng::gpu::MultiGpuConfig;
 using knng::gpu::partition_points;
 using knng::gpu::cpu_multi_brute_force_point;
 using knng::gpu::cpu_multi_brute_force_tile;
+using knng::gpu::CpuTripleBuffer;
+using knng::gpu::BufSlot;
+using knng::gpu::next_slot;
 
 // ===========================================================================
 // Step 80 — CPU collective simulation
@@ -195,6 +199,61 @@ TEST(MultiGpu, TileSharded_MatchesPointSharded) {
 
     for (std::size_t i = 0; i < n; ++i)
         EXPECT_EQ(rp.neighbors[i], rt.neighbors[i]);
+}
+
+// ===========================================================================
+// Step 84 — Triple-buffered pipeline
+// ===========================================================================
+
+TEST(Pipeline, NextSlot_Cycles) {
+    EXPECT_EQ(next_slot(BufSlot::A), BufSlot::B);
+    EXPECT_EQ(next_slot(BufSlot::B), BufSlot::C);
+    EXPECT_EQ(next_slot(BufSlot::C), BufSlot::A);
+}
+
+TEST(Pipeline, CpuTripleBuffer_FillComputeDrain_Passthrough) {
+    // Verify that data written by fill is seen by compute and drain.
+    CpuTripleBuffer<float> buf(4);
+    std::vector<std::size_t> drain_chunks;
+    std::vector<float>       drain_values;
+
+    buf.run(
+        3, // n_chunks
+        [](std::vector<float>& slot, std::size_t chunk) {
+            // fill: write chunk index into all elements
+            std::fill(slot.begin(), slot.end(), static_cast<float>(chunk));
+        },
+        [](std::vector<float>& slot) {
+            // compute: multiply by 2
+            for (auto& v : slot) v *= 2.f;
+        },
+        [&](const std::vector<float>& slot, std::size_t chunk) {
+            drain_chunks.push_back(chunk);
+            drain_values.push_back(slot[0]);
+        }
+    );
+
+    ASSERT_EQ(drain_chunks.size(), 3u);
+    for (std::size_t i = 0; i < 3; ++i)
+        EXPECT_FLOAT_EQ(drain_values[i], static_cast<float>(i) * 2.f);
+}
+
+TEST(Pipeline, CpuTripleBuffer_SumAcrossChunks) {
+    // Accumulate the sum of all chunk outputs.
+    CpuTripleBuffer<int> buf(3);
+    float total = 0.f;
+    buf.run(
+        5,
+        [](std::vector<int>& slot, std::size_t chunk) {
+            std::fill(slot.begin(), slot.end(), static_cast<int>(chunk + 1));
+        },
+        [](std::vector<int>& /*slot*/) { /* identity */ },
+        [&](const std::vector<int>& slot, std::size_t /*chunk*/) {
+            for (auto v : slot) total += static_cast<float>(v);
+        }
+    );
+    // sum over chunks 1..5, each with 3 elements = 3*(1+2+3+4+5) = 45
+    EXPECT_FLOAT_EQ(total, 45.f);
 }
 
 TEST(NcclComm, CpuSim_ReduceScatter_FourRanks) {

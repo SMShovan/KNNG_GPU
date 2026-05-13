@@ -12,6 +12,47 @@ independent of the code diff.
 
 ---
 
+## [Step 84] — Stream overlap — triple-buffered compute + communication pipeline (2026-05-13)
+
+### What
+- **`include/knng/gpu/pipeline.hpp`**: `BufSlot` enum (A/B/C), `next_slot`
+  helper, `CpuTripleBuffer<T>` template class (header-only; always compiled),
+  `GpuTriplePipeline` skeleton (CUDA-gated, PIMPL).
+- **`CpuTripleBuffer<T>::run`**: processes n_chunks items through three
+  user-supplied lambdas — `fill` (H2D sim), `compute` (kernel sim), `drain`
+  (D2H sim) — in a sliding-window loop that exercises the same data-flow as
+  three CUDA streams.
+- **Tests**: `NextSlot_Cycles`, `CpuTripleBuffer_FillComputeDrain_Passthrough`,
+  `CpuTripleBuffer_SumAcrossChunks` (3 new tests, 18 total).
+
+### Why
+Multi-GPU algorithms that exceed GPU memory must stream data in chunks.
+Without pipelining, each chunk incurs sequential H2D → compute → D2H latency.
+A triple buffer hides all three stages behind each other: while chunk i is
+being computed, chunk i+1 is transferring H2D and chunk i-1 is transferring
+D2H.  This was already applied for single-GPU streaming in Phase 8 Step 59;
+Phase 11 extends it to the multi-GPU communication layer.
+
+### Tradeoff
+The CPU simulation runs stages sequentially (no actual overlap), so the
+timing model is wrong — but the *data-flow* is correct.  Tests verify that
+fill → compute → drain produces the right values, not that they overlap.
+The GPU path (GpuTriplePipeline skeleton) requires CUDA events for stream
+synchronization; that implementation is left for Phase 12 where it is needed
+for inter-node overlap.
+
+### Learning
+The triple-buffer pattern is standard in graphics pipelines (swap chains)
+and network protocol stacks (ring buffers).  On GPU it appears in cuDNN's
+workspace reuse, NCCL's ring-allreduce, and RAPIDS' cuIO async readers.
+All share the same insight: three slots are the minimum to hide both
+producer and consumer latency simultaneously.
+
+### Next
+Step 85: multi-GPU NN-Descent.
+
+---
+
 ## [Step 83] — Tile-sharded multi-GPU brute-force (2026-05-13)
 
 ### What

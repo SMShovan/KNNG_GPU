@@ -20,6 +20,7 @@ using knng::gpu::MultiGpuConfig;
 using knng::gpu::partition_points;
 using knng::gpu::cpu_multi_brute_force_point;
 using knng::gpu::cpu_multi_brute_force_tile;
+using knng::gpu::cpu_multi_nn_descent;
 using knng::gpu::CpuTripleBuffer;
 using knng::gpu::BufSlot;
 using knng::gpu::next_slot;
@@ -254,6 +255,67 @@ TEST(Pipeline, CpuTripleBuffer_SumAcrossChunks) {
     );
     // sum over chunks 1..5, each with 3 elements = 3*(1+2+3+4+5) = 45
     EXPECT_FLOAT_EQ(total, 45.f);
+}
+
+// ===========================================================================
+// Step 85 — Multi-GPU NN-Descent
+// ===========================================================================
+
+TEST(MultiGpu, NNDescent_ProducesValidGraph) {
+    // 10 points on a line, k=3, 2 virtual GPUs
+    const std::size_t n = 10, d = 1;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d; ds.data.resize(n);
+    for (std::size_t i = 0; i < n; ++i) ds.data[i] = static_cast<float>(i);
+
+    MultiGpuConfig cfg;
+    cfg.n_gpus = 2; cfg.k = 3; cfg.n_iterations = 5;
+
+    const auto result = cpu_multi_nn_descent(ds, cfg, 42u);
+    ASSERT_EQ(result.n, n);
+    ASSERT_EQ(result.k, 3u);
+
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t r = 0; r < 3; ++r) {
+            const auto id = result.neighbors[i*3+r];
+            if (id == knng::index_t(-1)) continue;
+            EXPECT_LT(static_cast<std::size_t>(id), n);
+            EXPECT_GE(result.distances[i*3+r], 0.f);
+        }
+}
+
+TEST(MultiGpu, NNDescent_SeedDeterminism) {
+    const std::size_t n = 8, d = 2;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d; ds.data.resize(n * d);
+    for (std::size_t i = 0; i < n; ++i) {
+        ds.data[i*d+0] = static_cast<float>(i % 4);
+        ds.data[i*d+1] = static_cast<float>(i) / 4.f;
+    }
+    MultiGpuConfig cfg; cfg.n_gpus = 2; cfg.k = 2; cfg.n_iterations = 3;
+
+    const auto r1 = cpu_multi_nn_descent(ds, cfg, 99u);
+    const auto r2 = cpu_multi_nn_descent(ds, cfg, 99u);
+    EXPECT_EQ(r1.neighbors, r2.neighbors);
+}
+
+TEST(MultiGpu, NNDescent_FourGpus_ProducesValidGraph) {
+    const std::size_t n = 12, d = 2;
+    knng::Dataset ds;
+    ds.n = n; ds.d = d; ds.data.resize(n * d);
+    for (std::size_t i = 0; i < n; ++i) {
+        ds.data[i*d+0] = static_cast<float>(i % 4);
+        ds.data[i*d+1] = static_cast<float>(i) / 4.f;
+    }
+    MultiGpuConfig cfg; cfg.n_gpus = 4; cfg.k = 2; cfg.n_iterations = 5;
+    const auto result = cpu_multi_nn_descent(ds, cfg, 7u);
+    ASSERT_EQ(result.n, n);
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t r = 0; r < 2; ++r) {
+            const auto id = result.neighbors[i*2+r];
+            if (id == knng::index_t(-1)) continue;
+            EXPECT_LT(static_cast<std::size_t>(id), n);
+        }
 }
 
 TEST(NcclComm, CpuSim_ReduceScatter_FourRanks) {

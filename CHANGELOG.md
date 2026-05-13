@@ -12,6 +12,47 @@ independent of the code diff.
 
 ---
 
+## [Step 85] — Multi-GPU NN-Descent (2026-05-13)
+
+### What
+- **CPU reference** (`src/gpu/multi_gpu_cpu_ref.cpp`):
+  `cpu_multi_nn_descent` — graph partitioned by point ownership; each virtual
+  rank runs the local-join update loop for its shard.  Simulates an
+  AllGather after each iteration via shared CPU arrays (all ranks see all
+  updates immediately).  XorShift64 random initialization; stops early when
+  no updates occur.
+- **Tests**: `NNDescent_ProducesValidGraph`, `NNDescent_SeedDeterminism`,
+  `NNDescent_FourGpus_ProducesValidGraph` (3 new tests, 21 total).
+
+### Why
+NN-Descent is the most communication-intensive Phase 11 algorithm: each
+iteration requires neighbor-of-neighbor lookups that may cross partition
+boundaries.  The CPU reference simulates this via a flat shared array — the
+"AllGather" in the comment denotes the synchronization point where every rank
+receives remote updates.  On real hardware this would be `ncclAllGather` of
+the changed neighbor-list entries, batched by the change-set deduplication
+introduced in NEO-DNND (Phase 12 Step 91).
+
+### Tradeoff
+The CPU simulation AllGathers the entire graph state (all n × k entries) each
+iteration, not just the changed entries.  This is O(n × k) communication per
+iteration — 4× worse than the NEO-DNND dedup-based approach for typical
+change rates of ~25% per iteration.  The simulation is correct; the
+communication reduction is left for Phase 12 Step 91.
+
+### Learning
+The boundary between "local compute" and "remote fetch" in multi-GPU NND is
+exactly the boundary between two union-find components in the partitioned
+graph.  Points near a shard boundary have more remote neighbors; the
+deduplication trick in NEO-DNND exploits this structure to batch remote
+requests efficiently.  The AllGather approach here proves correctness before
+that optimization is applied.
+
+### Next
+Step 86: strong + weak scaling study.
+
+---
+
 ## [Step 84] — Stream overlap — triple-buffered compute + communication pipeline (2026-05-13)
 
 ### What

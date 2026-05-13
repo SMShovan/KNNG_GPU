@@ -7,6 +7,7 @@
 ///   Step 74: `add_reverse_edges_kernel`
 ///   Step 75: `prune_detour_kernel`
 ///   Step 76: `label_propagate_kernel`, `bridge_components_kernel`
+///   Step 77: `gpu_refine_graph` pipeline driver
 
 #include <knng/gpu/graph_refinement.hpp>
 #include <knng/gpu/device_graph.hpp>
@@ -456,6 +457,23 @@ void gpu_merge_components(DeviceGraph& graph,
                graph.ids.data(), graph.dists.data(), graph.flags.data(),
                d_labels.data(), d_vectors, main_label, n, ku, dmu);
     GPU_SYNC();
+}
+
+// ===========================================================================
+// Step 77 — GPU pipeline driver
+// ===========================================================================
+
+void gpu_refine_graph(DeviceGraph& graph,
+                       const GraphRefinementConfig& cfg,
+                       const float* d_vectors,
+                       std::size_t dim) {
+    if (cfg.enforce_out_degree) gpu_enforce_out_degree(graph);
+    if (cfg.rank_reorder)       gpu_rank_reorder(graph);
+    if (cfg.add_reverse_edges)  gpu_add_reverse_edges(graph);
+    if (cfg.prune_detour && d_vectors)
+        gpu_prune_detour_edges(graph, d_vectors, dim);
+    if (cfg.merge_components && d_vectors)
+        gpu_merge_components(graph, d_vectors, dim);
 }
 
 } // namespace knng::gpu

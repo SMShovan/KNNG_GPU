@@ -12,6 +12,51 @@ independent of the code diff.
 
 ---
 
+## [Step 77] — Ablation driver — cpu_refine_graph / gpu_refine_graph (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: adds `cpu_refine_graph` and
+  `gpu_refine_graph` driver functions; both take a `GraphRefinementConfig`
+  struct that gates each of Steps 72–76 via boolean flags.
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_refine_graph` — sequential pipeline:
+  `enforce_out_degree` → `rank_reorder` → `add_reverse_edges` →
+  `prune_detour_edges` → `merge_components`.  Steps 75/76 skipped when
+  `vectors == nullptr`.
+- **GPU driver** (`src/gpu/graph_refinement.cu`):
+  `gpu_refine_graph` — identical chain with GPU kernel variants; all
+  five steps guarded by config flags and optional `d_vectors` pointer.
+- **Tests**: `RefineGraph_AllSteps_ProducesValidGraph` (full pipeline on a
+  5-point 1-D dataset; validates id < n and dist ≥ 0 for all valid entries),
+  `RefineGraph_SkipPruneAndMerge_StillSorted` (ablation: only Step 72 active;
+  checks sorted invariant) — 2 new tests, 18 total.
+
+### Why
+The five individual steps were useful for incremental development and unit
+testing, but production callers need a single entry point.  The
+`GraphRefinementConfig` ablation struct enables systematic ablation studies:
+disable one step at a time to quantify its contribution to recall@10.  The
+pipeline order matters — pruning (Step 75) depends on the sorted invariant
+(Step 72) and benefits from reverse edges (Step 74) already being present.
+
+### Tradeoff
+A single `cpu_refine_graph` call passes `vectors` and `dim` through to the
+last two steps.  If callers supply a null pointer with `prune_detour = true`
+in the config, the steps silently skip.  An alternative design would
+throw/assert on misconfiguration, but silent skip matches how Phase 9's
+GPU kernels handle optional inputs.
+
+### Learning
+Composing small, tested primitives into a driver function is the standard
+pattern we used in Phase 8 (the distance-kernel dispatch table) and Phase 9
+(the NND-iteration wrapper).  Each primitive remains independently testable
+and the driver tests only the composition.
+
+### Next
+Step 78: cuVS CAGRA comparison notes (CHANGELOG entry; no new code).
+
+---
+
 ## [Step 76] — Strong-component merging (2026-05-13)
 
 ### What

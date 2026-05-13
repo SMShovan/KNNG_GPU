@@ -14,11 +14,13 @@
 #include <vector>
 
 using knng::gpu::CpuDeviceGraph;
+using knng::gpu::GraphRefinementConfig;
 using knng::gpu::cpu_enforce_out_degree;
 using knng::gpu::cpu_rank_reorder;
 using knng::gpu::cpu_add_reverse_edges;
 using knng::gpu::cpu_prune_detour_edges;
 using knng::gpu::cpu_merge_components;
+using knng::gpu::cpu_refine_graph;
 using knng::gpu::kSentinelDist;
 
 static CpuDeviceGraph make_graph(std::size_t n, std::size_t k,
@@ -294,6 +296,71 @@ TEST(GraphRefinement, MergeComponents_TwoComponentsBridged) {
         }
     }
     EXPECT_TRUE(bridge_found);
+}
+
+// ===========================================================================
+// Step 77 — Ablation driver (cpu_refine_graph)
+// ===========================================================================
+
+// Full pipeline: sorted, reverse edges added, detour pruning applied.
+// Result must be a valid graph: all valid ids < n, all valid dists >= 0.
+TEST(GraphRefinement, RefineGraph_AllSteps_ProducesValidGraph) {
+    // 5 points on a line: x = 0,1,2,3,4
+    const std::size_t n = 5, k = 3;
+    std::vector<float> vecs(n * 2);
+    for (std::size_t i = 0; i < n; ++i) { vecs[i*2] = static_cast<float>(i); vecs[i*2+1] = 0.f; }
+
+    // Build a graph where each point has k random neighbors
+    CpuDeviceGraph g(n, k);
+    // Manually set: each point has 3 neighbors (unsorted) with distances
+    g.ids   = {1u, 3u, 4u,   // row 0
+               0u, 2u, 4u,   // row 1
+               1u, 0u, 3u,   // row 2
+               2u, 4u, 0u,   // row 3
+               3u, 0u, 1u};  // row 4
+    // Distances: L2² on 1D
+    g.dists = {1.f, 9.f, 16.f,
+               1.f, 1.f, 9.f,
+               1.f, 4.f, 1.f,
+               1.f, 1.f, 9.f,
+               1.f, 16.f, 9.f};
+
+    GraphRefinementConfig cfg;
+    cfg.enforce_out_degree = true;
+    cfg.rank_reorder       = true;
+    cfg.add_reverse_edges  = true;
+    cfg.prune_detour       = true;
+    cfg.merge_components   = true;
+    cpu_refine_graph(g, cfg, vecs.data(), 2);
+
+    const auto S = static_cast<knng::index_t>(-1);
+    for (std::size_t i = 0; i < n * k; ++i) {
+        const auto id = g.ids[i];
+        if (id == S) continue;
+        EXPECT_LT(static_cast<std::size_t>(id), n);
+        EXPECT_GE(g.dists[i], 0.f);
+    }
+}
+
+// Ablation: skip pruning and merging — graph should still be sorted.
+TEST(GraphRefinement, RefineGraph_SkipPruneAndMerge_StillSorted) {
+    CpuDeviceGraph g(2, 3);
+    g.ids   = {1u, 0u, 0u,   // row 0 (unsorted distances)
+               0u, 0u, 0u};  // row 1
+    g.dists = {5.f, 2.f, 1.f,
+               1.f, 1.f, 1.f};
+
+    GraphRefinementConfig cfg;
+    cfg.enforce_out_degree = true;
+    cfg.rank_reorder       = false;
+    cfg.add_reverse_edges  = false;
+    cfg.prune_detour       = false;
+    cfg.merge_components   = false;
+    cpu_refine_graph(g, cfg);
+
+    // Row 0 must be sorted ascending by distance
+    EXPECT_LE(g.dists[0], g.dists[1]);
+    EXPECT_LE(g.dists[1], g.dists[2]);
 }
 
 // ===========================================================================

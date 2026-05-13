@@ -140,4 +140,32 @@ void gpu_merge_components(DeviceGraph& graph,
                            std::size_t dim);
 #endif
 
+// ---------------------------------------------------------------------------
+// Step 77 — Full pipeline driver
+// ---------------------------------------------------------------------------
+
+/// @brief Run the complete CAGRA-style refinement pipeline on a CPU graph.
+///
+/// Steps are applied in order 72 → 73 → 74 → 75 → 76, each gated by the
+/// corresponding flag in `cfg`.  Steps 75 and 76 require `vectors` to be
+/// non-null.
+///
+/// @param graph    In/out SoA graph.
+/// @param cfg      Ablation flags — set false to skip individual steps.
+/// @param vectors  Row-major float matrix [n × dim]; may be nullptr if
+///                 neither `prune_detour` nor `merge_components` is set.
+/// @param dim      Feature dimension (ignored when vectors is nullptr).
+void cpu_refine_graph(CpuDeviceGraph& graph,
+                       const GraphRefinementConfig& cfg,
+                       const float* vectors = nullptr,
+                       std::size_t dim = 0);
+
+#if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
+/// @brief GPU pipeline driver — chains Steps 72–76 with config gating.
+void gpu_refine_graph(DeviceGraph& graph,
+                       const GraphRefinementConfig& cfg,
+                       const float* d_vectors = nullptr,
+                       std::size_t dim = 0);
+#endif
+
 } // namespace knng::gpu

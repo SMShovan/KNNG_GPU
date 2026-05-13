@@ -292,4 +292,21 @@ void cpu_merge_components(CpuDeviceGraph& graph,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step 77 — Full pipeline driver (CPU reference)
+// ---------------------------------------------------------------------------
+
+void cpu_refine_graph(CpuDeviceGraph& graph,
+                       const GraphRefinementConfig& cfg,
+                       const float* vectors,
+                       std::size_t dim) {
+    if (cfg.enforce_out_degree) cpu_enforce_out_degree(graph);
+    if (cfg.rank_reorder)       cpu_rank_reorder(graph);
+    if (cfg.add_reverse_edges)  cpu_add_reverse_edges(graph);
+    if (cfg.prune_detour && vectors)
+        cpu_prune_detour_edges(graph, vectors, dim);
+    if (cfg.merge_components && vectors)
+        cpu_merge_components(graph, vectors, dim);
+}
+
 } // namespace knng::gpu

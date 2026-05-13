@@ -53,6 +53,39 @@ Step 86: strong + weak scaling study.
 
 ---
 
+## [Step 87] — Phase 11 capstone writeup — docs/MULTI_GPU.md (2026-05-13)
+
+### What
+- **`docs/MULTI_GPU.md`**: Full Phase 11 capstone document (8 sections,
+  ~260 lines).  Covers NCCL integration, topology-aware routing, point- and
+  tile-sharded brute-force, triple-buffered pipeline, multi-GPU NN-Descent,
+  and the scaling study from Step 86.  Includes architecture diagram,
+  design notes, per-step test tables, and a Phase 12 preview.
+
+### Why
+The capstone ties together 8 individual steps into a coherent narrative.
+Reviewers and future contributors can read MULTI_GPU.md to understand
+*why* each strategy was chosen (point-shard vs. tile-shard trade-off,
+full-graph AllGather vs. delta-compress) before diving into the code.
+
+### Tradeoff
+The document models hardware performance from analytical estimates rather
+than measured numbers — no multi-GPU node available in this environment.
+Projections are clearly labelled as such and will be replaced by
+benchmark results when hardware is available.
+
+### Learning
+Writing the Phase 11 capstone revealed a clean separation of concerns:
+**communication strategy** (AllGather, reduce-scatter, delta-compress)
+is orthogonal to **partitioning strategy** (point-shard, tile-shard).
+Phase 12 can improve the communication layer without touching partition
+logic, and vice versa.
+
+### Next
+Phase 12: distributed multi-node KNNG via MPI + NCCL ring (Steps 88–95).
+
+---
+
 ## [Step 86] — Multi-GPU scaling study (2026-05-13)
 
 ### What

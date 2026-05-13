@@ -15,6 +15,7 @@
 
 using knng::gpu::CpuDeviceGraph;
 using knng::gpu::cpu_enforce_out_degree;
+using knng::gpu::cpu_rank_reorder;
 using knng::gpu::kSentinelDist;
 
 static CpuDeviceGraph make_graph(std::size_t n, std::size_t k,
@@ -77,6 +78,57 @@ TEST(GraphRefinement, EnforceOutDegree_MultipleRows) {
     EXPECT_EQ(g.ids[3], 2u); EXPECT_FLOAT_EQ(g.dists[3], 3.f);
     EXPECT_EQ(g.ids[4], 1u); EXPECT_FLOAT_EQ(g.dists[4], 4.f);
     EXPECT_EQ(g.ids[5], 0u); EXPECT_FLOAT_EQ(g.dists[5], 7.f);
+}
+
+// ===========================================================================
+// Step 73 — Rank-based reordering
+// ===========================================================================
+
+// Build a 3-point graph where point 0 has neighbors [1, 2].
+// Point 1's list: [0, 2] — so qi=0 appears at rank 0 in neighbor 1's list.
+// Point 2's list: [1, 0] — so qi=0 appears at rank 1 in neighbor 2's list.
+// After rank_reorder, neighbor 1 (rank 0) should come before neighbor 2 (rank 1).
+TEST(GraphRefinement, RankReorder_PrefersLowerRankNeighbor) {
+    // 3 points, k=2
+    CpuDeviceGraph g(3, 2);
+    // Row 0: neighbors 2 (dist 1.0), 1 (dist 2.0) — stored distance-ascending
+    g.ids   = {2u, 1u,   // row 0 — we'll reorder by rank, not distance
+               0u, 2u,   // row 1: [0 at rank0, 2 at rank1]
+               1u, 0u};  // row 2: [1 at rank0, 0 at rank1]
+    g.dists = {1.f, 2.f,
+               1.f, 2.f,
+               1.f, 2.f};
+    // ranks for qi=0: neighbor 2's list has 0 at position 1 → rank=1
+    //                 neighbor 1's list has 0 at position 0 → rank=0
+    // so after reorder: ids[0][0]=1 (rank 0), ids[0][1]=2 (rank 1)
+    cpu_rank_reorder(g);
+    EXPECT_EQ(g.ids[0], 1u);
+    EXPECT_EQ(g.ids[1], 2u);
+}
+
+TEST(GraphRefinement, RankReorder_SentinelsStayLast) {
+    const auto S = static_cast<knng::index_t>(-1);
+    // 2 points, k=3, one sentinel
+    CpuDeviceGraph g(2, 3);
+    g.ids   = {1u, S,  S,   // row 0: one valid neighbor, two sentinels
+               0u, S,  S};  // row 1
+    g.dists = {1.f, kSentinelDist, kSentinelDist,
+               1.f, kSentinelDist, kSentinelDist};
+    cpu_rank_reorder(g);
+    EXPECT_EQ(g.ids[0], 1u);
+    EXPECT_EQ(g.ids[1], S);
+    EXPECT_EQ(g.ids[2], S);
+}
+
+TEST(GraphRefinement, RankReorder_AllSentinels_NoChange) {
+    const auto S = static_cast<knng::index_t>(-1);
+    CpuDeviceGraph g(1, 3);
+    g.ids   = {S, S, S};
+    g.dists = {kSentinelDist, kSentinelDist, kSentinelDist};
+    cpu_rank_reorder(g);
+    EXPECT_EQ(g.ids[0], S);
+    EXPECT_EQ(g.ids[1], S);
+    EXPECT_EQ(g.ids[2], S);
 }
 
 // ===========================================================================

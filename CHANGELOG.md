@@ -12,6 +12,51 @@ independent of the code diff.
 
 ---
 
+## [Step 73] — Rank-based reordering (2026-05-13)
+
+### What
+- **`include/knng/gpu/graph_refinement.hpp`**: adds `cpu_rank_reorder` /
+  `gpu_rank_reorder` declarations.
+- **CPU reference** (`src/gpu/graph_refinement_cpu_ref.cpp`):
+  `cpu_rank_reorder` — for each point i and each of its neighbors j, computes
+  rank(j) = position at which i appears in j's own neighbor list (lower = j
+  considers i a closer neighbor).  Rows are then stably sorted by rank
+  ascending; sentinels sorted to the tail.
+- **GPU kernels** (`src/gpu/graph_refinement.cu`):
+  `build_ranks_kernel` — one thread per node j writes `rank[j][id] = r` for
+  each neighbor id at position r.  `rank_sort_kernel` — one block per point,
+  loads rank scores into shared memory, insertion-sorts by rank ascending.
+- **Tests**: `RankReorder_PrefersLowerRankNeighbor`,
+  `RankReorder_SentinelsStayLast`, `RankReorder_AllSentinels_NoChange`
+  (3 new tests, 7 total).
+
+### Why
+After Step 72 the rows are sorted by *distance*, but distance alone does not
+capture edge quality: a neighbor that lists us very early in its own list is
+a "reciprocal" neighbor — both endpoints regard each other as close.
+Reciprocal edges are far more reliable for beam-search navigation because
+traversing them is unlikely to lead into a dead-end sub-graph.  Rank-based
+reordering promotes these high-quality edges to the front of each list,
+improving greedy-search hit rate without changing the graph topology.
+
+### Tradeoff
+The O(n²) rank table is feasible for small-to-medium n (< 10⁶ with float32
+on GPU); for very large n a CSR adjacency lookup would be needed.  The GPU
+rank table also requires n² × 4 bytes of device memory — 4 GB for n = 10⁶.
+A production implementation would cap n per shard and process the graph in
+tiles.
+
+### Learning
+Rank reciprocity is the CAGRA paper's key insight for graph quality.  Their
+empirical finding: sorting by rank (rather than distance) consistently
+improves recall@10 by 2–5 percentage points on SIFT-1M without any change
+to the traversal algorithm.
+
+### Next
+Step 74: add reverse edges.
+
+---
+
 ## [Step 72] — Fixed out-degree enforcement (2026-05-13)
 
 ### What

@@ -47,4 +47,24 @@ void cpu_enforce_out_degree(CpuDeviceGraph& graph);
 void gpu_enforce_out_degree(DeviceGraph& graph);
 #endif
 
+// ---------------------------------------------------------------------------
+// Step 73 — Rank-based reordering
+// ---------------------------------------------------------------------------
+
+/// @brief Reorder each point's neighbor list so that neighbors with lower
+/// average rank (i.e., they appear close to position 0 in their own lists)
+/// come first.  Valid entries only; sentinels stay at the tail.
+///
+/// For each candidate neighbor j of point i, its rank score is the mean
+/// list-position at which i appears in j's own neighbor list (lower = better).
+/// The row is then stably sorted by rank score ascending.
+///
+/// @param graph  In/out SoA graph (mutated in place).
+void cpu_rank_reorder(CpuDeviceGraph& graph);
+
+#if defined(KNNG_HAVE_CUDA) || defined(KNNG_HAVE_HIP)
+/// @brief GPU: build per-neighbor rank scores then sort each row (one block per point).
+void gpu_rank_reorder(DeviceGraph& graph);
+#endif
+
 } // namespace knng::gpu

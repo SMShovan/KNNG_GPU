@@ -42,6 +42,7 @@ if(KNNG_HAVE_CUDA)
     set(_dist_gpu_sources
         cuda_aware_mpi.cu        # Step 89: device-buffer MPI wrappers
         brute_force_dist.cu      # Step 91: ring-based distributed BF on GPU
+        nn_descent_dist.cu       # Steps 92-96: distributed NND + NEO-DNND opts
     )
 
     add_library(knng_dist_gpu STATIC ${_dist_gpu_sources})

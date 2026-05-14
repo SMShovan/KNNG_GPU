@@ -12,8 +12,10 @@
 
 #include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
+#include <knng/dist_gpu/nn_descent.hpp>
 #include <knng/dist_gpu/topology.hpp>
 #include <knng/dist/brute_force_mpi.hpp>
+#include <knng/dist/nn_descent_mpi.hpp>
 #include <knng/dist/sharded_dataset.hpp>
 
 #include <mpi.h>
@@ -67,6 +69,34 @@ knng::Knng cpu_dist_brute_force(const knng::Dataset& root_dataset,
         shard, static_cast<std::size_t>(cfg.k), comm);
 
     // Gather all local results to rank 0.
+    return knng::dist::gather_graph(local_graph, shard, /*root_rank=*/0, comm);
+}
+
+} // namespace knng::dist_gpu
+
+// ===========================================================================
+// Step 92 — Distributed NN-Descent: CPU reference (reuses Phase 6)
+// ===========================================================================
+
+namespace knng::dist_gpu {
+
+knng::Knng cpu_dist_nn_descent(const knng::Dataset& root_dataset,
+                               const DistTopology&  /*topo*/,
+                               const DistNndConfig& cfg,
+                               MPI_Comm             comm)
+{
+    auto shard = knng::dist::ShardedDataset::scatter(root_dataset, 0, comm);
+
+    knng::dist::NnDescentMpiConfig mpi_cfg;
+    mpi_cfg.max_iters   = static_cast<std::size_t>(cfg.n_iterations);
+    mpi_cfg.delta       = cfg.delta;
+    mpi_cfg.seed        = cfg.seed;
+    mpi_cfg.use_reverse = cfg.use_reverse;
+    mpi_cfg.rho         = static_cast<double>(cfg.rho);
+
+    auto local_graph = knng::dist::nn_descent_mpi(
+        shard, static_cast<std::size_t>(cfg.k), mpi_cfg, comm);
+
     return knng::dist::gather_graph(local_graph, shard, /*root_rank=*/0, comm);
 }
 

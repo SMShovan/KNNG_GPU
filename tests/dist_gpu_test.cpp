@@ -10,6 +10,7 @@
 
 #include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
+#include <knng/dist_gpu/nn_descent.hpp>
 #include <knng/dist_gpu/topology.hpp>
 #include <knng/core/dataset.hpp>
 
@@ -244,6 +245,73 @@ TEST(DistBruteForce, Gpu_ProducesValidGraph)
     if (topo.my_rank() == 0) {
         EXPECT_EQ(graph.n, 20u);
         EXPECT_EQ(graph.k(), 3u);
+        for (std::size_t i = 0; i < graph.n; ++i)
+            for (auto nb : graph.neighbors_of(i))
+                EXPECT_LT(nb, graph.n);
+    }
+#endif
+}
+
+// ===========================================================================
+// Steps 92–96 — Distributed NN-Descent
+// ===========================================================================
+
+TEST(DistNnDescent, Cpu_ProducesValidGraph)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(30, 6);
+
+    knng::dist_gpu::DistNndConfig cfg;
+    cfg.k = 3; cfg.n_iterations = 5;
+
+    auto graph = knng::dist_gpu::cpu_dist_nn_descent(ds, topo, cfg, MPI_COMM_WORLD);
+
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(graph.n, 30u);
+        EXPECT_EQ(graph.k, static_cast<std::size_t>(cfg.k));
+        for (std::size_t i = 0; i < graph.n; ++i)
+            for (auto nb : graph.neighbors_of(i))
+                EXPECT_LT(nb, graph.n) << "invalid neighbor at row " << i;
+    }
+}
+
+TEST(DistNnDescent, Cpu_Deterministic)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(20, 4);
+
+    knng::dist_gpu::DistNndConfig cfg;
+    cfg.k = 3; cfg.n_iterations = 4; cfg.seed = 99u;
+
+    auto g1 = knng::dist_gpu::cpu_dist_nn_descent(ds, topo, cfg, MPI_COMM_WORLD);
+    auto g2 = knng::dist_gpu::cpu_dist_nn_descent(ds, topo, cfg, MPI_COMM_WORLD);
+
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(g1.neighbors, g2.neighbors) << "cpu_dist_nn_descent not deterministic";
+    }
+}
+
+TEST(DistNnDescent, Gpu_ProducesValidGraph)
+{
+    SKIP_IF_NO_GPU();
+#if defined(KNNG_HAVE_CUDA)
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(30, 6);
+
+    knng::dist_gpu::DistNndConfig cfg;
+    cfg.k = 3; cfg.n_iterations = 5;
+
+    auto graph = knng::dist_gpu::gpu_dist_nn_descent(ds, topo, cfg, MPI_COMM_WORLD);
+
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(graph.n, 30u);
+        EXPECT_EQ(graph.k, static_cast<std::size_t>(cfg.k));
         for (std::size_t i = 0; i < graph.n; ++i)
             for (auto nb : graph.neighbors_of(i))
                 EXPECT_LT(nb, graph.n);

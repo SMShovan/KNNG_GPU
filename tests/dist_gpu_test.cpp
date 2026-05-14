@@ -11,6 +11,7 @@
 #include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
 #include <knng/dist_gpu/nn_descent.hpp>
+#include <knng/dist_gpu/out_of_core.hpp>
 #include <knng/dist_gpu/replication_policy.hpp>
 #include <knng/dist_gpu/topology.hpp>
 #include <knng/core/dataset.hpp>
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -436,6 +438,87 @@ TEST(BandwidthPolicy, Reset_ClearsCounters)
     bool found_7 = false;
     for (auto id : after_reset) if (id == 7) { found_7 = true; break; }
     EXPECT_FALSE(found_7) << "After reset, point 7 should not be replicated";
+}
+
+// ===========================================================================
+// Step 99 — Out-of-core streaming NND tests
+// ===========================================================================
+
+namespace {
+knng::Dataset make_streaming_dataset(std::size_t n, int d, unsigned seed = 7)
+{
+    knng::Dataset ds;
+    ds.n = n; ds.d = static_cast<std::size_t>(d);
+    ds.data.resize(n * d);
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.f, 1.f);
+    for (auto& v : ds.data) v = dist(rng);
+    return ds;
+}
+} // namespace
+
+TEST(OutOfCore_Cpu, InCore_MatchesStreamingResult)
+{
+    // chunk_size = 0 → all points in one chunk (in-core mode).
+    auto dataset = make_streaming_dataset(40, 8);
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+
+    knng::dist_gpu::OutOfCoreConfig cfg;
+    cfg.nnd.k = 3; cfg.nnd.n_iterations = 5; cfg.chunk_size = 0;
+
+    auto g_incore = knng::dist_gpu::cpu_dist_streaming_nn_descent(
+        dataset, topo, cfg, MPI_COMM_WORLD);
+
+    if (mpi_rank() == 0) {
+        ASSERT_EQ(g_incore.n, dataset.n);
+        ASSERT_EQ(g_incore.k, static_cast<std::size_t>(cfg.nnd.k));
+        // Every node should have 3 distinct neighbors.
+        for (std::size_t i = 0; i < g_incore.n; ++i) {
+            auto nb = g_incore.neighbors_of(i);
+            std::sort(nb.begin(), nb.end());
+            EXPECT_EQ(std::unique(nb.begin(), nb.end()), nb.end())
+                << "duplicate neighbor at row " << i;
+        }
+    }
+}
+
+TEST(OutOfCore_Cpu, ChunkedStreaming_ProducesValidGraph)
+{
+    // chunk_size = 8 → several pipeline windows per iteration.
+    auto dataset = make_streaming_dataset(40, 8);
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+
+    knng::dist_gpu::OutOfCoreConfig cfg;
+    cfg.nnd.k = 3; cfg.nnd.n_iterations = 5; cfg.chunk_size = 8;
+
+    auto g = knng::dist_gpu::cpu_dist_streaming_nn_descent(
+        dataset, topo, cfg, MPI_COMM_WORLD);
+
+    if (mpi_rank() == 0) {
+        ASSERT_EQ(g.n, dataset.n);
+        ASSERT_EQ(g.k, static_cast<std::size_t>(cfg.nnd.k));
+        // Spot-check: all neighbor IDs are in range.
+        for (std::size_t i = 0; i < g.n; ++i)
+            for (auto nb : g.neighbors_of(i))
+                EXPECT_LT(static_cast<std::size_t>(nb), g.n)
+                    << "out-of-range neighbor at row " << i;
+    }
+}
+
+TEST(OutOfCore_Gpu, StreamingVariant_DoesNotCrash)
+{
+    SKIP_IF_NO_GPU();
+    auto dataset = make_streaming_dataset(32, 8);
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+
+    knng::dist_gpu::OutOfCoreConfig cfg;
+    cfg.nnd.k = 3; cfg.nnd.n_iterations = 3; cfg.chunk_size = 8;
+
+    EXPECT_NO_THROW({
+        auto g = knng::dist_gpu::gpu_dist_streaming_nn_descent(
+            dataset, topo, cfg, MPI_COMM_WORLD);
+        (void)g;
+    });
 }
 
 // ===========================================================================

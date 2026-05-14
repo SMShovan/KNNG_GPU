@@ -321,6 +321,36 @@ TEST(DistNnDescent, Gpu_ProducesValidGraph)
 }
 
 // ===========================================================================
+// Steps 94–96 — Intra-node replication, BW-aware, overlap (GPU only)
+// ===========================================================================
+
+TEST(DistNnDescentOpts, Gpu_DeduplicatedVariant_Valid)
+{
+    SKIP_IF_NO_GPU();
+#if defined(KNNG_HAVE_CUDA)
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(20, 4);
+    knng::dist_gpu::DistNndConfig cfg; cfg.k = 3; cfg.n_iterations = 3;
+    auto g = knng::dist_gpu::gpu_dist_nn_descent_dedup(ds, topo, cfg, MPI_COMM_WORLD);
+    if (topo.my_rank() == 0) { EXPECT_EQ(g.n, 20u); EXPECT_EQ(g.k, 3u); }
+#endif
+}
+
+TEST(DistNnDescentOpts, Gpu_OverlapVariant_Valid)
+{
+    SKIP_IF_NO_GPU();
+#if defined(KNNG_HAVE_CUDA)
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(20, 4);
+    knng::dist_gpu::DistNndConfig cfg; cfg.k = 3; cfg.n_iterations = 3;
+    auto g = knng::dist_gpu::gpu_dist_nn_descent_overlap(ds, topo, cfg, MPI_COMM_WORLD);
+    if (topo.my_rank() == 0) { EXPECT_EQ(g.n, 20u); EXPECT_EQ(g.k, 3u); }
+#endif
+}
+
+// ===========================================================================
 // Step 93 — GPU-side bitset dedup
 // ===========================================================================
 

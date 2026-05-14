@@ -407,12 +407,5 @@ knng::Knng gpu_dist_nn_descent_bw(const knng::Dataset& dataset,
     return gpu_dist_nn_descent(dataset, topo, cfg, comm);
 }
 
-knng::Knng gpu_dist_nn_descent_overlap(const knng::Dataset& dataset,
-                                       const DistTopology&  topo,
-                                       const DistNndConfig& cfg,
-                                       MPI_Comm             comm)
-{
-    return gpu_dist_nn_descent(dataset, topo, cfg, comm);
-}
-
 } // namespace knng::dist_gpu
+// gpu_dist_nn_descent_overlap is defined in nn_descent_overlap.cu (Step 96).

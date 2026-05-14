@@ -46,6 +46,7 @@ if(KNNG_HAVE_CUDA)
         nn_descent_dist.cu       # Steps 92-96: distributed NND + NEO-DNND opts
         request_dedup_gpu.cu     # Step 93: GPU-side bitset dedup + CUB prefix-sum
         shm_replication_gpu.cu   # Step 94: intra-node NCCL broadcast (NVLink)
+        nn_descent_overlap.cu    # Step 96: async MPI_Isend/Irecv overlaps GPU compute
     )
 
     add_library(knng_dist_gpu STATIC ${_dist_gpu_sources})

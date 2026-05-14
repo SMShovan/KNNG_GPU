@@ -21,6 +21,7 @@ add_library(knng_dist_gpu_ref STATIC
     dist_gpu_cpu_ref.cpp
     topology_dist.cpp            # Step 90: hierarchical topology (pure MPI)
     replication_policy.cpp       # Steps 93 & 95: dedup + BW-aware policy (CPU ref)
+    benchmark_dist.cpp           # Step 97: wall-clock benchmark driver + recall@k
 )
 target_link_libraries(knng_dist_gpu_ref
     PUBLIC

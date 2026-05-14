@@ -10,7 +10,11 @@
 /// When KNNG_DIST_GPU_CUDA_BUILD is defined (by CMake when CUDA is present),
 /// sections that would conflict with the real .cu implementations are omitted.
 
+#include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
+#include <knng/dist_gpu/topology.hpp>
+#include <knng/dist/brute_force_mpi.hpp>
+#include <knng/dist/sharded_dataset.hpp>
 
 #include <mpi.h>
 
@@ -43,3 +47,27 @@ void mpi_device_recv(void* buf, std::size_t bytes,
 } // namespace knng::dist_gpu
 
 #endif // !KNNG_DIST_GPU_CUDA_BUILD
+
+// ===========================================================================
+// Step 91 — Distributed brute-force: CPU reference (reuses Phase 6 ring)
+// ===========================================================================
+
+namespace knng::dist_gpu {
+
+knng::Knng cpu_dist_brute_force(const knng::Dataset& root_dataset,
+                                const DistTopology&  /*topo*/,
+                                const DistBfConfig&  cfg,
+                                MPI_Comm             comm)
+{
+    // Scatter the full dataset from rank 0 to all ranks.
+    auto shard = knng::dist::ShardedDataset::scatter(root_dataset, 0, comm);
+
+    // Ring-based exact brute-force — reuses Phase 6 implementation.
+    auto local_graph = knng::dist::brute_force_knn_mpi(
+        shard, static_cast<std::size_t>(cfg.k), comm);
+
+    // Gather all local results to rank 0.
+    return knng::dist::gather_graph(local_graph, shard, /*root_rank=*/0, comm);
+}
+
+} // namespace knng::dist_gpu

@@ -8,8 +8,10 @@
 /// A custom main() initialises MPI so the test binary can be launched by
 /// `mpirun -np 1` (or N ranks on a cluster) without modification.
 
+#include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
 #include <knng/dist_gpu/topology.hpp>
+#include <knng/core/dataset.hpp>
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -165,6 +167,88 @@ TEST(DistTopology, ToString_Root)
         EXPECT_FALSE(s.empty()) << "to_string() on root must be non-empty";
         EXPECT_NE(s.find("node"), std::string::npos);
     }
+}
+
+// ===========================================================================
+// Step 91 — Distributed brute-force
+// ===========================================================================
+
+namespace {
+// Make a tiny random-ish dataset for testing.
+knng::Dataset make_test_dataset(int n, int d, float seed = 1.0f)
+{
+    knng::Dataset ds;
+    ds.n = static_cast<std::size_t>(n);
+    ds.d = static_cast<std::size_t>(d);
+    ds.data.resize(ds.n * ds.d);
+    float v = seed;
+    for (auto& x : ds.data) { x = v; v = v * 1.1f + 0.3f; }
+    return ds;
+}
+} // anonymous namespace
+
+TEST(DistBruteForce, Cpu_ProducesValidGraph)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(20, 4);
+
+    knng::dist_gpu::DistBfConfig cfg;
+    cfg.k = 3;
+
+    auto graph = knng::dist_gpu::cpu_dist_brute_force(ds, topo, cfg, MPI_COMM_WORLD);
+
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(graph.n, 20u);
+        EXPECT_EQ(graph.k(), 3u);
+        // Every neighbor index must be a valid point.
+        for (std::size_t i = 0; i < graph.n; ++i) {
+            for (auto nb : graph.neighbors_of(i))
+                EXPECT_LT(nb, graph.n) << "invalid neighbor index at row " << i;
+        }
+    }
+}
+
+TEST(DistBruteForce, Cpu_KSmallDataset)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(10, 8, 2.0f);
+
+    knng::dist_gpu::DistBfConfig cfg;
+    cfg.k = 4;
+
+    auto graph = knng::dist_gpu::cpu_dist_brute_force(ds, topo, cfg, MPI_COMM_WORLD);
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(graph.n, 10u);
+        EXPECT_EQ(graph.k(), 4u);
+    }
+}
+
+TEST(DistBruteForce, Gpu_ProducesValidGraph)
+{
+    SKIP_IF_NO_GPU();
+#if defined(KNNG_HAVE_CUDA)
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 1);
+
+    knng::Dataset ds;
+    if (topo.my_rank() == 0) ds = make_test_dataset(20, 4);
+
+    knng::dist_gpu::DistBfConfig cfg;
+    cfg.k = 3;
+
+    auto graph = knng::dist_gpu::gpu_dist_brute_force(ds, topo, cfg, MPI_COMM_WORLD);
+
+    if (topo.my_rank() == 0) {
+        EXPECT_EQ(graph.n, 20u);
+        EXPECT_EQ(graph.k(), 3u);
+        for (std::size_t i = 0; i < graph.n; ++i)
+            for (auto nb : graph.neighbors_of(i))
+                EXPECT_LT(nb, graph.n);
+    }
+#endif
 }
 
 // ===========================================================================

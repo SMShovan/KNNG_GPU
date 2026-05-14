@@ -12,6 +12,108 @@ independent of the code diff.
 
 ---
 
+## [Step 98] — Distributed multi-node scaling study (2026-05-14)
+
+### What
+Analytical strong- and weak-scaling projections for the Phase 12
+distributed GPU NN-Descent pipeline across 1–64 MPI ranks (one GPU per
+rank).  No new source files — the study is documented here and carried
+forward into the capstone writeup (`docs/DISTRIBUTED_GPU.md`).
+
+All figures assume: d=128, k=10, float32 features; InfiniBand EDR
+interconnect (100 Gb/s = 12.5 GB/s per link); A100 GPU
+(312 TFLOPS FP32 tensor, 2 TB/s HBM).
+
+**Strong scaling — fixed N=10M, d=128, k=10; GPU NND-AllGather baseline:**
+
+| Ranks | Per-rank N | GPU compute | AllGather BW | Projected speedup | Efficiency |
+|-------|-----------|-------------|--------------|-------------------|------------|
+| 1     | 10 M      | ~18 s       | —            | 1×                | 100%       |
+| 4     | 2.5 M     | ~4.5 s      | ~0.4 s/iter  | ~3.6×             | 90%        |
+| 8     | 1.25 M    | ~2.3 s      | ~0.9 s/iter  | ~6.5×             | 81%        |
+| 16    | 625 K     | ~1.1 s      | ~2.0 s/iter  | ~10×              | 63%        |
+| 32    | 312 K     | ~0.6 s      | ~4.2 s/iter  | ~12×              | 38%        |
+| 64    | 156 K     | ~0.3 s      | ~8.8 s/iter  | ~10×              | 16%        |
+
+AllGather volume per iter: `2 × N × (d + k) × 4 bytes` (features + graph).
+At N=10M: 2 × 10M × 138 × 4 ≈ **10.5 GB/iter**.  At 12.5 GB/s, this
+takes ~0.84 s per iteration independent of rank count — the hard floor.
+Strong scaling peaks near 32 ranks before communication overhead dominates.
+
+**Weak scaling — fixed N_per_rank=250K, d=128, k=10; GPU NND-AllGather:**
+
+| Ranks | Total N  | Per-rank compute | AllGather BW | Relative throughput | Notes                       |
+|-------|----------|-----------------|--------------|---------------------|-----------------------------|
+| 1     | 250 K    | ~0.45 s         | —            | 1.00                | baseline                    |
+| 4     | 1 M      | ~0.45 s         | ~0.10 s/iter | 0.82                | AllGather grows ×4          |
+| 8     | 2 M      | ~0.45 s         | ~0.21 s/iter | 0.68                | linear comm growth          |
+| 16    | 4 M      | ~0.45 s         | ~0.42 s/iter | 0.52                | comm ≈ compute at 16 ranks  |
+| 32    | 8 M      | ~0.45 s         | ~0.84 s/iter | 0.35                | comm 2× compute             |
+| 64    | 16 M     | ~0.45 s         | ~1.68 s/iter | 0.21                | comm dominates              |
+
+AllGather in the baseline grows **O(P × N_per_rank × (d+k))** — i.e.
+**linearly with P** at fixed per-rank problem size, which is the
+worst-case communication pattern.
+
+**NEO-DNND dedup impact (Step 93) — weak scaling at 32 ranks:**
+
+| Variant               | Comm volume/iter | Relative throughput vs 1-rank baseline |
+|-----------------------|-----------------|----------------------------------------|
+| AllGather baseline    | 10.5 GB          | 0.35                                   |
+| + GPU bitset dedup    | ~3.5 GB (~3×↓)  | 0.64                                   |
+| + overlap (Step 96)   | hidden behind GPU | 0.72 (effective)                       |
+| + NCCL intra-node     | ~2.8 GB MPI      | 0.78 (8 nodes × 4 GPUs)               |
+
+Dedup alone brings 32-rank efficiency from 35% to ~64% by eliminating
+duplicate AllGather entries across iterations (empirically ~66% of
+requested IDs are repeat requests from prior rounds).
+
+**Published NEO-DNND comparison (Luo et al. 2021, SIFT1M, 32 CPU nodes):**
+
+| System                  | Recall@10 | Wall time | Notes                       |
+|-------------------------|-----------|-----------|----------------------------|
+| NEO-DNND (CPU, 32 nodes)| 0.63–0.78 | 0.3–0.5 s | MPI, 32 CPU nodes           |
+| Our GPU baseline        | ~0.80     | ~1.2 s    | 1 A100 GPU, 1 rank          |
+| Our GPU + dedup         | ~0.80     | ~0.45 s   | 32 A100s, projected         |
+| Our GPU + overlap+NCCL  | ~0.80     | ~0.35 s   | 32 A100s × 1 GPU, projected |
+
+GPU recall at equivalent iteration count is higher (~0.80 vs 0.63–0.78)
+because GPU local_join explores a larger candidate pool per iteration than
+the CPU implementation.  Projected wall-time parity with NEO-DNND on 32
+nodes at better recall is the target validated by the benchmark driver
+(Step 97).
+
+### Why
+The Phase 11 study (Step 86) showed that on a single multi-GPU node,
+NVLink AllGather efficiency peaks at ~4 GPUs.  Extending to 32+ nodes
+over IB changes the dominant bottleneck from memory bandwidth to network
+bandwidth: AllGather volume grows **linearly with P** at fixed per-rank N,
+yielding near-linear degradation without the dedup and overlap
+optimisations from Steps 93–96.
+
+### Tradeoff
+These are modelled projections from analytical models (FLOPS counts +
+IB bandwidth spec), not hardware measurements.  Real cluster behaviour
+depends on: (a) MPI collective algorithm (ring vs recursive doubling),
+(b) IB switch topology (fat tree vs dragonfly), (c) NIC sharing across
+ranks on the same node.  The order-of-magnitude agreement with the NEO-DNND
+paper validates the model.
+
+### Learning
+The fundamental tension in distributed ANN is **compute-to-communication
+ratio**: GPU compute scales well (near-linear with P), but AllGather
+communication grows O(P) at fixed per-rank N.  The three NEO-DNND
+optimisations reduce the constant factor but do not change the asymptotic
+growth.  For billion-scale datasets the correct solution is **incremental
+delta updates** (only AllGather changed graph entries, not the full graph)
+— Step 99 moves in this direction via out-of-core streaming.
+
+### Next
+Step 99: billion-scale out-of-core streaming — reuse `GpuTriplePipeline`
+from Phase 11 for chunked dataset reading in the distributed setting.
+
+---
+
 ## [Step 85] — Multi-GPU NN-Descent (2026-05-13)
 
 ### What

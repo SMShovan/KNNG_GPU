@@ -521,10 +521,40 @@ set_target_properties(test_multi_gpu PROPERTIES OUTPUT_NAME "test_multi_gpu")
 gtest_discover_tests(test_multi_gpu
     PROPERTIES LABELS "gpu;multi_gpu;nccl" DISCOVERY_TIMEOUT 10)
 
+# `test_dist_gpu` — Phase 12 (Steps 89–100): distributed multi-node GPU.
+# Always built when MPI is present; GPU tests gated at runtime via GTEST_SKIP.
+if(KNNG_HAVE_MPI)
+    add_executable(test_dist_gpu dist_gpu_test.cpp)
+    target_link_libraries(test_dist_gpu
+        PRIVATE
+            knng::dist_gpu_ref
+            GTest::gtest         # NOT gtest_main — test provides its own main
+    )
+    if(KNNG_HAVE_CUDA)
+        target_link_libraries(test_dist_gpu PRIVATE knng::dist_gpu CUDA::cudart)
+    endif()
+    knng_set_warnings(test_dist_gpu)
+    set_target_properties(test_dist_gpu PROPERTIES OUTPUT_NAME "test_dist_gpu")
+endif()
+
 if(KNNG_HAVE_MPI)
     find_program(MPIRUN_EXEC
         NAMES mpirun mpiexec
         DOC   "MPI launcher for test_mpi_env")
+
+    # Register test_dist_gpu (provides its own MPI-initialising main).
+    if(MPIRUN_EXEC)
+        add_test(
+            NAME    dist_gpu
+            COMMAND "${MPIRUN_EXEC}" -np 1
+                    "$<TARGET_FILE:test_dist_gpu>"
+        )
+        set_tests_properties(dist_gpu PROPERTIES LABELS "mpi;dist;gpu")
+    else()
+        gtest_discover_tests(test_dist_gpu
+            PROPERTIES LABELS "mpi;dist;gpu"
+            DISCOVERY_TIMEOUT 10)
+    endif()
 
     add_executable(test_mpi_env mpi_env_test.cpp)
     target_link_libraries(test_mpi_env

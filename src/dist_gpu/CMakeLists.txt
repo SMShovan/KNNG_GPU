@@ -19,6 +19,7 @@
 # ── CPU reference (always compiled when MPI is present) ───────────────────
 add_library(knng_dist_gpu_ref STATIC
     dist_gpu_cpu_ref.cpp
+    topology_dist.cpp            # Step 90: hierarchical topology (pure MPI)
 )
 target_link_libraries(knng_dist_gpu_ref
     PUBLIC

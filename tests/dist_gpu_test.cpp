@@ -9,11 +9,14 @@
 /// `mpirun -np 1` (or N ranks on a cluster) without modification.
 
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
+#include <knng/dist_gpu/topology.hpp>
 
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <algorithm>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -114,6 +117,54 @@ TEST(CudaAwareMpi, GpuQueryAndSend_DoesNotCrash)
     for (int i = 0; i < N; ++i)
         EXPECT_FLOAT_EQ(h_recv[i], h_send[i]) << "float mismatch at " << i;
 #endif
+}
+
+// ===========================================================================
+// Step 90 — Hierarchical topology
+// ===========================================================================
+
+TEST(DistTopology, Build_SingleRank)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+    EXPECT_EQ(topo.size(), 1);
+    EXPECT_EQ(topo.my_rank(), 0);
+    EXPECT_EQ(topo.num_nodes(), 1);
+    EXPECT_EQ(topo.my_node(), 0);
+    EXPECT_EQ(topo.gpu_for_rank(0), -1) << "gpus_per_node=0 → no GPU assigned";
+}
+
+TEST(DistTopology, Build_WithGpus)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 4);
+    EXPECT_GE(topo.gpu_for_rank(0), 0)
+        << "gpus_per_node=4 → rank 0 gets GPU 0";
+    EXPECT_LT(topo.gpu_for_rank(0), 4);
+}
+
+TEST(DistTopology, IntraNodeRanks_ContainsMyself)
+{
+    auto topo  = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+    const auto& peers = topo.intra_node_ranks(0);
+    EXPECT_FALSE(peers.empty());
+    auto it = std::find(peers.begin(), peers.end(), 0);
+    EXPECT_NE(it, peers.end()) << "rank 0 must appear in its own node-peer list";
+}
+
+TEST(DistTopology, SameNode_SingleRank)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+    EXPECT_TRUE(topo.same_node(0, 0));
+}
+
+TEST(DistTopology, ToString_Root)
+{
+    auto topo = knng::dist_gpu::DistTopology::build(MPI_COMM_WORLD, 0);
+    auto s    = topo.to_string();
+    // Rank 0 should produce a non-empty description.
+    if (topo.my_rank() == 0) {
+        EXPECT_FALSE(s.empty()) << "to_string() on root must be non-empty";
+        EXPECT_NE(s.find("node"), std::string::npos);
+    }
 }
 
 // ===========================================================================

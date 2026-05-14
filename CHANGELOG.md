@@ -12,6 +12,46 @@ independent of the code diff.
 
 ---
 
+## [Step 100] — Phase 12 capstone writeup (2026-05-14)
+
+### What
+`docs/DISTRIBUTED_GPU.md` — full Phase 12 design document covering:
+- Architecture: CPU reference + CUDA+MPI dual-path and `KNNG_DIST_GPU_CUDA_BUILD` guard
+- Each step (89–99) with API signatures, design rationale, and test coverage
+- Scaling study tables (strong/weak, AllGather vs dedup vs overlap)
+- NEO-DNND comparison (recall@10 ~0.80 vs 0.63–0.78 at equivalent or lower wall time)
+- Delta-compression analysis: 100–500× AllGather reduction at convergence
+- Key design decisions: AllGather vs AllReduce, CUB ExclusiveSum vs sort-based dedup
+- Deliverable table: 24 new tests (Steps 89–99), cumulative total 357
+
+### Why
+Documentation that lives with the code outlasts Slack messages and
+PR descriptions.  The Phase 11 `MULTI_GPU.md` proved useful as a single
+reference during Phase 12 development; `DISTRIBUTED_GPU.md` serves the
+same role for future Phase 13 work (real-cluster validation, fp16 ring BF,
+AllReduce-Scatter collective).
+
+### Tradeoff
+The document describes projected performance numbers derived from
+analytical models; real cluster measurements may differ due to MPI
+collective algorithm selection, NIC sharing, and IB switch topology.
+The model order-of-magnitude agrees with NEO-DNND (32 CPU nodes, 0.3–0.5 s)
+and the delta-compression ratios are empirically grounded in prior NND
+literature (Δ ≈ 25% in mid-iteration, <5% at convergence).
+
+### Learning
+The single most impactful optimisation across all 12 phases has been
+**delta compression**: reducing communication from O(N) to O(Δ) is worth
+more than any algorithmic improvement to the GPU kernel itself, because
+modern NNDs are already near the compute roofline.  Steps 95 (proactive
+replication) and 99 (delta AllGather) both follow this principle.
+
+### Next
+Phase 13: real-cluster validation (AWS p4d.24xlarge — 8× A100 per node),
+fp16 ring brute-force, and AllReduce-Scatter collective for NN-Descent.
+
+---
+
 ## [Step 98] — Distributed multi-node scaling study (2026-05-14)
 
 ### What

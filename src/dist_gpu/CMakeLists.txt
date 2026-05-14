@@ -20,6 +20,7 @@
 add_library(knng_dist_gpu_ref STATIC
     dist_gpu_cpu_ref.cpp
     topology_dist.cpp            # Step 90: hierarchical topology (pure MPI)
+    replication_policy.cpp       # Steps 93 & 95: dedup + BW-aware policy (CPU ref)
 )
 target_link_libraries(knng_dist_gpu_ref
     PUBLIC
@@ -43,6 +44,7 @@ if(KNNG_HAVE_CUDA)
         cuda_aware_mpi.cu        # Step 89: device-buffer MPI wrappers
         brute_force_dist.cu      # Step 91: ring-based distributed BF on GPU
         nn_descent_dist.cu       # Steps 92-96: distributed NND + NEO-DNND opts
+        request_dedup_gpu.cu     # Step 93: GPU-side bitset dedup + CUB prefix-sum
     )
 
     add_library(knng_dist_gpu STATIC ${_dist_gpu_sources})

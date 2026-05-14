@@ -11,6 +11,7 @@
 #include <knng/dist_gpu/brute_force.hpp>
 #include <knng/dist_gpu/cuda_aware_mpi.hpp>
 #include <knng/dist_gpu/nn_descent.hpp>
+#include <knng/dist_gpu/replication_policy.hpp>
 #include <knng/dist_gpu/topology.hpp>
 #include <knng/core/dataset.hpp>
 
@@ -317,6 +318,94 @@ TEST(DistNnDescent, Gpu_ProducesValidGraph)
                 EXPECT_LT(nb, graph.n);
     }
 #endif
+}
+
+// ===========================================================================
+// Step 93 — GPU-side bitset dedup
+// ===========================================================================
+
+TEST(GpuDedup, CpuDedup_RemovesDuplicates)
+{
+    std::vector<knng::index_t> ids = {5, 2, 5, 3, 2, 7, 3};
+    auto stats = knng::dist_gpu::cpu_dedup_requests(ids, 10);
+
+    EXPECT_EQ(stats.raw_count, 7u);
+    EXPECT_EQ(stats.dedup_count, 4u);  // {2, 3, 5, 7}
+    EXPECT_EQ(ids.size(), 4u);
+    EXPECT_GT(stats.reduction(), 0.0);
+}
+
+TEST(GpuDedup, CpuDedup_EmptyList)
+{
+    std::vector<knng::index_t> ids;
+    auto stats = knng::dist_gpu::cpu_dedup_requests(ids, 10);
+    EXPECT_EQ(stats.raw_count, 0u);
+    EXPECT_EQ(stats.dedup_count, 0u);
+    EXPECT_DOUBLE_EQ(stats.reduction(), 0.0);
+}
+
+TEST(GpuDedup, GpuDedup_MatchesCpuDedup)
+{
+    SKIP_IF_NO_GPU();
+#if defined(KNNG_HAVE_CUDA)
+    // Build a raw request list with duplicates.
+    std::vector<knng::index_t> h_raw = {0, 3, 1, 3, 2, 0, 5, 5};
+    const std::size_t global_n = 8;
+
+    knng::index_t* d_raw = nullptr;
+    knng::index_t* d_out = nullptr;
+    cudaMalloc(&d_raw, h_raw.size() * sizeof(knng::index_t));
+    cudaMalloc(&d_out, h_raw.size() * sizeof(knng::index_t));
+    cudaMemcpy(d_raw, h_raw.data(), h_raw.size() * sizeof(knng::index_t),
+               cudaMemcpyHostToDevice);
+
+    auto [n_unique, stats] = knng::dist_gpu::gpu_dedup_requests(
+        d_raw, h_raw.size(), global_n, d_out);
+
+    // CPU reference
+    auto h_cpu = h_raw;
+    auto cpu_stats = knng::dist_gpu::cpu_dedup_requests(h_cpu, global_n);
+
+    EXPECT_EQ(n_unique, cpu_stats.dedup_count)
+        << "GPU and CPU dedup must produce same unique count";
+
+    cudaFree(d_out);
+    cudaFree(d_raw);
+#endif
+}
+
+// ===========================================================================
+// Step 95 — Bandwidth-aware proactive replication
+// ===========================================================================
+
+TEST(BandwidthPolicy, ReplicatesAfterThreshold)
+{
+    knng::dist_gpu::BandwidthAwarePolicy policy;
+    policy.threshold = 2;
+
+    std::vector<knng::index_t> requests = {0, 1, 2, 0};
+    auto replicate = policy.update(requests, 5);
+
+    // Point 0 has been requested twice → should appear in replicate list.
+    bool found_0 = false;
+    for (auto id : replicate) if (id == 0) { found_0 = true; break; }
+    EXPECT_TRUE(found_0) << "Point 0 requested 2x should be replicated";
+}
+
+TEST(BandwidthPolicy, Reset_ClearsCounters)
+{
+    knng::dist_gpu::BandwidthAwarePolicy policy;
+    policy.threshold = 2;
+
+    std::vector<knng::index_t> req = {7, 7};
+    policy.update(req, 10);
+    policy.reset();
+    auto after_reset = policy.update({7}, 10);
+
+    // After reset + single request, frequency is 1 < threshold 2.
+    bool found_7 = false;
+    for (auto id : after_reset) if (id == 7) { found_7 = true; break; }
+    EXPECT_FALSE(found_7) << "After reset, point 7 should not be replicated";
 }
 
 // ===========================================================================

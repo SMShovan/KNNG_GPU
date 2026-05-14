@@ -333,3 +333,233 @@ TEST(NcclComm, CpuSim_ReduceScatter_FourRanks) {
     EXPECT_FLOAT_EQ(bufs[2][0], 12.f); // sum of element 2: 4×3 = 12
     EXPECT_FLOAT_EQ(bufs[3][0], 16.f); // sum of element 3: 4×4 = 16
 }
+
+// ===========================================================================
+// GPU tests — only compiled and run when CUDA + NCCL are both present.
+//
+// These tests exercise the real multi-GPU code paths:
+//   • gpu_multi_brute_force_point  (Step 82 GPU path)
+//   • gpu_multi_brute_force_tile   (Step 83 GPU path)
+//   • gpu_multi_nn_descent         (Step 85 GPU path)
+//   • GpuTriplePipeline            (Step 84 GPU path)
+//   • Topology::probe()            (Step 81 GPU path)
+//
+// On a cluster with ≥2 GPUs all tests run with n_gpus = min(2, device_count).
+// Single-GPU systems fall through to n_gpus=1 which exercises the code path
+// with trivial partitioning (the full graph on one GPU, no NCCL communication).
+// ===========================================================================
+
+#if defined(KNNG_HAVE_CUDA) && defined(KNNG_HAVE_NCCL)
+
+#include <cuda_runtime.h>
+#include <knng/gpu/pipeline.hpp>
+
+using knng::gpu::gpu_multi_brute_force_point;
+using knng::gpu::gpu_multi_brute_force_tile;
+using knng::gpu::gpu_multi_nn_descent;
+using knng::gpu::GpuTriplePipeline;
+using knng::gpu::Topology;
+
+// ---------------------------------------------------------------------------
+// Helper: query available CUDA device count, clamp to [1, max_gpus].
+// ---------------------------------------------------------------------------
+static int available_gpus(int max_gpus = 2) {
+    int n = 0;
+    cudaGetDeviceCount(&n);
+    return std::max(1, std::min(n, max_gpus));
+}
+
+// ---------------------------------------------------------------------------
+// Step 81 GPU — Topology::probe()
+//
+// Verifies that probe() returns a well-formed Topology:
+//   • n_gpus() == actual device count
+//   • Diagonal entries are PeerLinkType::Same
+//   • Off-diagonal entries are one of the known link types
+// ---------------------------------------------------------------------------
+TEST(Topology, Probe_WellFormed) {
+    int n = 0;
+    cudaGetDeviceCount(&n);
+    if (n == 0) GTEST_SKIP() << "No CUDA devices";
+
+    const auto t = Topology::probe();
+    EXPECT_EQ(t.n_gpus(), n);
+
+    for (int i = 0; i < n; ++i) {
+        EXPECT_EQ(t.link(i, i), PeerLinkType::Same);
+        for (int j = 0; j < n; ++j) {
+            if (i == j) continue;
+            const auto lt = t.link(i, j);
+            // Must be one of the four off-diagonal types.
+            EXPECT_TRUE(
+                lt == PeerLinkType::NVLink      ||
+                lt == PeerLinkType::PCIe        ||
+                lt == PeerLinkType::HostBridge  ||
+                lt == PeerLinkType::Simulated)
+                << "Unexpected link type between GPU " << i << " and " << j;
+        }
+    }
+}
+
+TEST(Topology, Probe_ToStringWorks) {
+    int n = 0;
+    cudaGetDeviceCount(&n);
+    if (n == 0) GTEST_SKIP() << "No CUDA devices";
+
+    const auto t = Topology::probe();
+    const std::string s = t.to_string();
+    EXPECT_NE(s.find("GPUs"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Step 84 GPU — GpuTriplePipeline construction and stream access.
+//
+// We can't measure overlap on a single-GPU system, but we verify:
+//   • Constructor does not throw (streams + events + device buffers allocate).
+//   • The three stream handles are non-null and distinct.
+//   • device_ptr returns non-null per slot.
+//   • signal/wait pairs do not crash (they just record/wait events).
+// ---------------------------------------------------------------------------
+TEST(GpuPipeline, Construction_ThreeDistinctStreams) {
+    int n = 0;
+    cudaGetDeviceCount(&n);
+    if (n == 0) GTEST_SKIP() << "No CUDA devices";
+
+    const std::size_t chunk = 1024 * sizeof(float);
+    GpuTriplePipeline pipe(chunk);
+
+    // Stream handles must be non-null and distinct.
+    EXPECT_NE(pipe.fill_stream(),    nullptr);
+    EXPECT_NE(pipe.compute_stream(), nullptr);
+    EXPECT_NE(pipe.drain_stream(),   nullptr);
+    EXPECT_NE(pipe.fill_stream(),    pipe.compute_stream());
+    EXPECT_NE(pipe.compute_stream(), pipe.drain_stream());
+    EXPECT_NE(pipe.fill_stream(),    pipe.drain_stream());
+
+    // Device pointers must be non-null.
+    EXPECT_NE(pipe.device_ptr(knng::gpu::BufSlot::A), nullptr);
+    EXPECT_NE(pipe.device_ptr(knng::gpu::BufSlot::B), nullptr);
+    EXPECT_NE(pipe.device_ptr(knng::gpu::BufSlot::C), nullptr);
+}
+
+TEST(GpuPipeline, SignalWait_DoesNotCrash) {
+    int n = 0;
+    cudaGetDeviceCount(&n);
+    if (n == 0) GTEST_SKIP() << "No CUDA devices";
+
+    GpuTriplePipeline pipe(256 * sizeof(float));
+
+    // A fill→compute→drain cycle for slot A.
+    // No actual data movement — just verifies event record/wait paths.
+    pipe.signal_fill_done(knng::gpu::BufSlot::A);
+    pipe.wait_fill_done  (knng::gpu::BufSlot::A);
+    pipe.signal_compute_done(knng::gpu::BufSlot::A);
+    pipe.wait_compute_done  (knng::gpu::BufSlot::A);
+
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+}
+
+// ---------------------------------------------------------------------------
+// Shared small dataset for GPU KNN tests.
+// 12 points on a line in 1-D so ground truth is trivial:
+//   nearest neighbor of point i is i-1 or i+1.
+// ---------------------------------------------------------------------------
+static knng::Dataset make_line_dataset(std::size_t n = 12) {
+    knng::Dataset ds;
+    ds.n = n; ds.d = 1;
+    ds.data.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+        ds.data[i] = static_cast<float>(i);
+    return ds;
+}
+
+// ---------------------------------------------------------------------------
+// Step 82 GPU — Point-sharded brute-force.
+// ---------------------------------------------------------------------------
+TEST(MultiGpuGpu, PointSharded_ProducesValidGraph) {
+    const int ng = available_gpus(2);
+    const auto ds = make_line_dataset(12);
+    MultiGpuConfig cfg; cfg.n_gpus = ng; cfg.k = 2;
+
+    const auto result = gpu_multi_brute_force_point(ds, cfg);
+    ASSERT_EQ(result.n, 12u);
+    ASSERT_EQ(result.k, 2u);
+
+    for (std::size_t i = 0; i < 12u; ++i)
+        for (std::size_t r = 0; r < 2u; ++r) {
+            const auto id = result.neighbors[i*2+r];
+            EXPECT_LT(static_cast<std::size_t>(id), 12u)
+                << "Invalid id at (" << i << ", " << r << ")";
+            EXPECT_NE(static_cast<std::size_t>(id), i)
+                << "Self-loop at (" << i << ", " << r << ")";
+            EXPECT_GE(result.distances[i*2+r], 0.f);
+        }
+}
+
+TEST(MultiGpuGpu, PointSharded_MatchesCpuReference) {
+    const int ng = available_gpus(2);
+    const auto ds = make_line_dataset(10);
+    MultiGpuConfig cfg; cfg.n_gpus = ng; cfg.k = 1;
+
+    const auto gpu_res = gpu_multi_brute_force_point(ds, cfg);
+    const auto cpu_res = cpu_multi_brute_force_point(ds, cfg);
+
+    // For k=1 on a line, the nearest neighbor is unambiguous for interior points.
+    // Check that GPU and CPU agree on the nearest neighbor ID for all points.
+    for (std::size_t i = 1; i < 9u; ++i) {  // skip endpoints (ambiguous)
+        EXPECT_EQ(gpu_res.neighbors[i], cpu_res.neighbors[i])
+            << "Mismatch at point " << i;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 83 GPU — Tile-sharded brute-force.
+// ---------------------------------------------------------------------------
+TEST(MultiGpuGpu, TileSharded_ProducesValidGraph) {
+    const int ng = available_gpus(4);
+    const auto ds = make_line_dataset(12);
+    MultiGpuConfig cfg; cfg.n_gpus = ng; cfg.k = 2;
+
+    const auto result = gpu_multi_brute_force_tile(ds, cfg);
+    ASSERT_EQ(result.n, 12u);
+    ASSERT_EQ(result.k, 2u);
+
+    for (std::size_t i = 0; i < 12u; ++i)
+        for (std::size_t r = 0; r < 2u; ++r) {
+            EXPECT_LT(static_cast<std::size_t>(result.neighbors[i*2+r]), 12u);
+            EXPECT_GE(result.distances[i*2+r], 0.f);
+        }
+}
+
+// ---------------------------------------------------------------------------
+// Step 85 GPU — Multi-GPU NN-Descent.
+// ---------------------------------------------------------------------------
+TEST(MultiGpuGpu, NNDescent_ProducesValidGraph) {
+    const int ng = available_gpus(2);
+    const auto ds = make_line_dataset(10);
+    MultiGpuConfig cfg; cfg.n_gpus = ng; cfg.k = 2; cfg.n_iterations = 5;
+
+    const auto result = gpu_multi_nn_descent(ds, cfg, 42u);
+    ASSERT_EQ(result.n, 10u);
+    ASSERT_EQ(result.k, 2u);
+
+    for (std::size_t i = 0; i < 10u; ++i)
+        for (std::size_t r = 0; r < 2u; ++r) {
+            const auto id = result.neighbors[i*2+r];
+            if (id == knng::index_t(-1)) continue;
+            EXPECT_LT(static_cast<std::size_t>(id), 10u);
+            EXPECT_GE(result.distances[i*2+r], 0.f);
+        }
+}
+
+TEST(MultiGpuGpu, NNDescent_Deterministic) {
+    const int ng = available_gpus(2);
+    const auto ds = make_line_dataset(8);
+    MultiGpuConfig cfg; cfg.n_gpus = ng; cfg.k = 2; cfg.n_iterations = 3;
+
+    const auto r1 = gpu_multi_nn_descent(ds, cfg, 77u);
+    const auto r2 = gpu_multi_nn_descent(ds, cfg, 77u);
+    EXPECT_EQ(r1.neighbors, r2.neighbors);
+}
+
+#endif // KNNG_HAVE_CUDA && KNNG_HAVE_NCCL

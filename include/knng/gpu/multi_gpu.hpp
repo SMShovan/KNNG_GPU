@@ -100,4 +100,51 @@ knng::Knng cpu_multi_nn_descent(const knng::Dataset& dataset,
                                   const MultiGpuConfig& cfg,
                                   std::uint64_t seed = 42u);
 
+// ===========================================================================
+// GPU implementations (CUDA + NCCL required)
+// ===========================================================================
+
+#if defined(KNNG_HAVE_CUDA) && defined(KNNG_HAVE_NCCL)
+
+/// @brief Multi-GPU point-sharded brute-force KNN (real GPU path).
+///
+/// Partitions queries across `cfg.n_gpus` CUDA devices.  Each rank runs a
+/// block-per-query kernel against all N references (broadcast from rank 0
+/// via ncclBcast).  Results gathered on the host.
+///
+/// @param dataset  Full dataset (all n × d vectors).
+/// @param cfg      n_gpus, k.
+/// @returns        KNN graph for all n points.
+knng::Knng gpu_multi_brute_force_point(const knng::Dataset& dataset,
+                                        const MultiGpuConfig& cfg);
+
+/// @brief Multi-GPU tile-sharded brute-force KNN (real GPU path).
+///
+/// 2-D tile partitioning: each GPU computes distances for a sub-block of
+/// (query_tile × ref_tile).  Partial top-k results are merged on the host
+/// across reference tiles sharing the same query tile.
+///
+/// @param dataset  Full dataset.
+/// @param cfg      n_gpus, k.
+/// @returns        KNN graph for all n points.
+knng::Knng gpu_multi_brute_force_tile(const knng::Dataset& dataset,
+                                       const MultiGpuConfig& cfg);
+
+/// @brief Multi-GPU NN-Descent (real GPU path).
+///
+/// Graph partitioned by point ownership.  Each iteration:
+///   1. Each GPU runs local_join on its shard (no communication).
+///   2. ncclAllGather syncs the full graph across all GPUs.
+///   3. ncclAllReduce accumulates per-GPU update counts for convergence.
+///
+/// @param dataset  Full dataset.
+/// @param cfg      n_gpus, k, n_iterations, delta.
+/// @param seed     RNG seed for random graph initialisation.
+/// @returns        KNN graph for all n points.
+knng::Knng gpu_multi_nn_descent(const knng::Dataset& dataset,
+                                  const MultiGpuConfig& cfg,
+                                  std::uint64_t seed = 42u);
+
+#endif // KNNG_HAVE_CUDA && KNNG_HAVE_NCCL
+
 } // namespace knng::gpu

@@ -23,6 +23,10 @@ set(_knng_gpu_sources
     gpu_nn_descent.cu       # Steps 63-70: GPU NN-Descent kernels
     graph_refinement.cu     # Steps 72-77: CAGRA-style graph refinement
     nccl_comm.cu            # Step 80: NcclComm RAII wrapper (NCCL-gated)
+    topology_gpu.cu         # Step 81: Topology::probe() — real CUDA P2P query
+    pipeline.cu             # Step 84: GpuTriplePipeline — 3-stream H2D/compute/D2H
+    brute_force_multi.cu    # Steps 82-83: GPU point-sharded + tile-sharded BF
+    nn_descent_multi.cu     # Step 85: GPU multi-GPU NN-Descent + AllGather
 )
 
 add_library(knng_gpu STATIC ${_knng_gpu_sources})
@@ -35,6 +39,12 @@ target_link_libraries(knng_gpu
         CUDA::cudart
         CUDA::cublas        # Step 56: cuBLAS GEMM distance
 )
+
+# NCCL: link the real NCCL library when it was found, otherwise the
+# KNNG_HAVE_NCCL guard in each .cu file keeps those paths dead.
+if(KNNG_HAVE_NCCL)
+    target_link_libraries(knng_gpu PUBLIC knng::nccl_iface)
+endif()
 
 set_target_properties(knng_gpu PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON

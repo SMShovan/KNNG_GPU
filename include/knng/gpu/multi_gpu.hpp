@@ -27,10 +27,11 @@ namespace knng::gpu {
 
 /// @brief Parameters controlling how work is partitioned across virtual GPUs.
 struct MultiGpuConfig {
-    int    n_gpus       = 1;     ///< Number of GPU devices (or virtual "ranks")
-    int    k            = 10;    ///< Neighbor-list size
-    float  rho          = 0.5f;  ///< NN-Descent sampling fraction
-    int    n_iterations = 10;    ///< NN-Descent iteration count
+    int    n_gpus       = 1;      ///< Number of GPU devices (or virtual "ranks")
+    int    k            = 10;     ///< Neighbor-list size
+    float  rho          = 0.5f;   ///< NN-Descent sampling fraction
+    int    n_iterations = 10;     ///< NN-Descent iteration count
+    double delta        = 0.001;  ///< Convergence threshold: stop when updates < delta*n*k
     bool   verbose      = false;
 };
 
